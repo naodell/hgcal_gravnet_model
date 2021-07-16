@@ -49,9 +49,15 @@ class FakeDataset(Dataset):
             n_clusters = min(np.random.randint(1, 6), n_hits)
             x = np.random.rand(n_hits, 5)
             y = (np.random.rand(n_hits) * n_clusters).astype(np.int8)
+            # Also make a cluster 'truth': energy, boundary_x, boundary_y, pid (4)
+            y_cluster = np.random.rand(n_clusters, 4)
+            # pid (last column) should be an integer; do 3 particle classes now
+            y_cluster[:,-1] = np.floor(y_cluster[:,-1] * 3)
             self.cache[i] = Data(
                 x = torch.from_numpy(x).type(torch.float),
-                y = torch.from_numpy(y)
+                y = torch.from_numpy(y),
+                y_cluster = torch.from_numpy(y_cluster),
+                n_clusters = torch.IntTensor([n_clusters])
                 )
         return self.cache[i]
 
@@ -203,10 +209,10 @@ class MyModel(nn.Module):
 
     def __init__(
         self, 
-        input_dim=5,
-        output_dim=4,
-        n_gravnet_blocks=4,
-        n_postgn_dense_blocks=4,
+        input_dim: int=5,
+        output_dim: int=4,
+        n_gravnet_blocks: int=4,
+        n_postgn_dense_blocks: int=4,
         ):
         super(MyModel, self).__init__()
         self.input_dim = input_dim
