@@ -1,3 +1,4 @@
+from typing import Deque
 import numpy as np
 
 import torch
@@ -28,7 +29,7 @@ def calc_LV_Lbeta(
     batch: torch.Tensor,
     qmin: float = .1,
     s_B: float = .1,
-    bkg_cluster_index: int = 0 # cluster_index entries with this value are bkg
+    bkg_cluster_index: int = 0 # cluster_index entries with this value are bkg/noise
     ):
     n_hits = beta.size(0)
     cluster_space_dim = cluster_coords.size(1)
@@ -125,12 +126,67 @@ def calc_LV_Lbeta(
     return LV, Lbeta
 
 
-def calc_Lp():
-    # TODO
-    # ------ Property loss ------
-    xi = pred_beta[i_cluster > 0].arctanh()
-    L_p = 1./xi.sum() * (xi * L(t,p)).sum()
-    pass
+def softclip(array, start_clip_value):
+    array /= start_clip_value
+    array = torch.where(array>1, torch.log(array+1.), array)
+    return array * start_clip_value
+
+def huber_jan(array, delta):
+    """
+    See: https://en.wikipedia.org/wiki/Huber_loss#Definition
+    """
+    loss_squared = array**2
+    array_abs = torch.abs(array)
+    loss_linear = delta**2 + 2.*delta * (array_abs - delta)
+    return tf.where(array_abs < delta, loss_squared, loss_linear)
+
+def huber(d, delta):
+    """
+    See: https://en.wikipedia.org/wiki/Huber_loss#Definition
+    """
+    return torch.where(d<=delta, .5*d**2, delta*(d-.5*delta))
+
+def calc_L_energy(pred_energy, truth_energy):
+    diff = torch.abs(pred_energy - truth_energy)
+    L = 10. * torch.exp(-0.1 * diff**2 ) + 0.01*diff
+    return softclip(L, 10.)
+
+def calc_L_time(pred_time, truth_time):
+    return softclip(huber(torch.abs(pred_time-truth_time), 2.), 6.)
+
+def calc_L_position(pred_position: torch.Tensor, truth_position: torch.Tensor):
+    d_squared = ((pred_position-truth_position)**2).sum(dim=-1)
+    return softclip(huber(torch.sqrt(d_squared/100. + 1e-2), 10.), 3.)
+
+def calc_L_classification(pred_pid, truth_pid):
+    raise NotImplementedError
+
+def calc_Lp(
+    pred_beta: torch.Tensor, truth_cluster_index,
+    pred_cluster_properties, truth_cluster_properties
+    ):
+    """
+    Property loss
+
+    Assumes:
+    0 : energy,
+    1 : time,
+    2,3 : boundary crossing position,
+    4 : pdgid
+    """
+    xi = torch.zeros_like(pred_beta)
+    xi[truth_cluster_index > 0] = pred_beta[truth_cluster_index > 0].arctanh()
+
+    L_energy = calc_L_energy(pred_cluster_properties[:,0], truth_cluster_properties[:,0])
+    L_time = calc_L_time(pred_cluster_properties[:,1], truth_cluster_properties[:,1])
+    L_position = calc_L_position(pred_cluster_properties[:,2:4], truth_cluster_properties[:,2:4])
+    # L_classification = calc_L_classification(pred_cluster_properties[:,4], pred_cluster_properties[:,4]) TODO
+
+    L_p = 0
+    xi_sum = xi.sum()
+    for L in [ L_energy, L_time, L_position ]:
+        L_p += 1./xi_sum * (xi * L).sum()
+    return L_p
 
 
 def batch_cluster_indices(cluster_id: torch.Tensor, batch: torch.Tensor):
@@ -157,30 +213,38 @@ def batch_cluster_indices(cluster_id: torch.Tensor, batch: torch.Tensor):
     return offset + cluster_id, n_clusters_per_event
 
 
-def main():
-    from gravnet_model import logger, debug, FakeDataset, MyModel, test_scatter_reduce
-
+def test_calc_LV_Lbeta():
+    from gravnet_model import logger, debug, FakeDataset
     batch_size = 4
     train_loader = DataLoader(FakeDataset(100), batch_size=batch_size, shuffle=True)
-
-    # model = MyModel(output_dim=5)
-    # print(model)
-    # model = make_fake_model(output_dim=7)
-
     for i, data in enumerate(train_loader):
         print(i, data)
-
         n_hits = data.x.size(0)
-
         LV, Lbeta = calc_LV_Lbeta(
             torch.rand(n_hits), # predicted betas
             torch.rand(n_hits, 3), # predicted cluster coordinates, doing 2 dims now
             data.y.type(torch.LongTensor), # truth cluster-index per hit
             data.batch
             )
-
         print(LV, Lbeta)
         return
+    
+def test_calc_Lp():
+    from dataset import TauDataset
+    for i, data in enumerate(DataLoader(TauDataset('data/taus'), batch_size=4, shuffle=True)):
+        print(i, data)
+        n_hits = data.x.size(0)
+        Lp = calc_Lp(
+            torch.rand(n_hits), # predicted betas
+            data.y.type(torch.LongTensor), # truth cluster-index per hit
+            torch.rand(n_hits, 5), # predicted cluster properties, 5
+            data.cluster_properties
+            )
+        print(Lp)
+        break
+
+def main():
+    pass
 
 if __name__ == '__main__':
     main()

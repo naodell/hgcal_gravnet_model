@@ -49,8 +49,8 @@ class FakeDataset(Dataset):
             n_clusters = min(np.random.randint(1, 6), n_hits)
             x = np.random.rand(n_hits, 5)
             y = (np.random.rand(n_hits) * n_clusters).astype(np.int8)
-            # Also make a cluster 'truth': energy, boundary_x, boundary_y, pid (4)
-            y_cluster = np.random.rand(n_clusters, 4)
+            # Also make a cluster 'truth': energy, time, boundary_x, boundary_y, pid (4)
+            y_cluster = np.random.rand(n_clusters, 5)
             # pid (last column) should be an integer; do 3 particle classes now
             y_cluster[:,-1] = np.floor(y_cluster[:,-1] * 3)
             self.cache[i] = Data(
@@ -205,7 +205,7 @@ class GravNetBlock(nn.Module):
         return x
 
 
-class MyModel(nn.Module):
+class GravnetModel(nn.Module):
 
     def __init__(
         self, 
@@ -214,7 +214,7 @@ class MyModel(nn.Module):
         n_gravnet_blocks: int=4,
         n_postgn_dense_blocks: int=4,
         ):
-        super(MyModel, self).__init__()
+        super(GravnetModel, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.n_gravnet_blocks = n_gravnet_blocks
@@ -266,11 +266,11 @@ class MyModel(nn.Module):
 
 
 
-def main():
+def test_model_sizes():
     batch_size = 4
     train_loader = DataLoader(FakeDataset(100), batch_size=batch_size, shuffle=True)
 
-    model = MyModel()
+    model = GravnetModel()
     print(model)
 
     for i, data in enumerate(train_loader):
@@ -279,6 +279,9 @@ def main():
         print(x.size())
         return
 
+
+def main():
+    pass
 
 if __name__ == '__main__':
     main()

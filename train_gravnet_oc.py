@@ -5,14 +5,18 @@ import objectcondensation, dataset
 from gravnet_model import GravnetModel
 from lrscheduler import CyclicLRWithRestarts
 
+torch.manual_seed(1004)
+
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device', device)
 
     batch_size = 4
-    train_dataset, test_dataset = dataset.TauDataset('data/taus').split_off(.2)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
+    shuffle = False
+    all_dataset, _ = dataset.TauDataset('data/taus').split(.1)
+    train_dataset, test_dataset = all_dataset.split(.8)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle)
 
     model = GravnetModel(input_dim=9, output_dim=8).to(device)
 
@@ -42,26 +46,38 @@ def main():
         print('Training epoch', epoch)
         model.train()
         scheduler.step()
-        for data in tqdm.tqdm(train_loader, total=len(train_loader)):
-            data = data.to(device)
-            optimizer.zero_grad()
-            result = model(data.x, data.batch)
-            loss = objectcondensation_loss(result, data)
-            loss.backward()
-            optimizer.step()
-            scheduler.batch_step()
+        try:
+            pbar = tqdm.tqdm(train_loader, total=len(train_loader))
+            pbar.set_postfix({'loss': '?'})
+            for data in pbar:
+                data = data.to(device)
+                optimizer.zero_grad()
+                result = model(data.x, data.batch)
+                loss = objectcondensation_loss(result, data)
+                loss.backward()
+                optimizer.step()
+                scheduler.batch_step()
+                pbar.set_postfix({'loss': float(loss)})
+        except Exception:
+            print('Exception encountered:', data)
+            for i in data.inpz:
+                print(train_dataset.npzs[i])
+            raise
 
-    def test():
-        # TODO
-        # Figure out what a good test metric is...
-        # Probably print out fraction of correct assignment 
-        # Will probably need to select high betas?
-        pass
-        # with torch.no_grad():
-        #     model.eval()
-        #     # HERE
+    def test(epoch):
+        with torch.no_grad():
+            model.eval()
+            loss = 0.
+            for data in tqdm.tqdm(test_loader, total=len(test_loader)):
+                data = data.to(device)
+                result = model(data.x, data.batch)
+                loss += objectcondensation_loss(result, data)
+            loss /= len(test_loader)
+            print(f'Avg test loss: {loss}')
 
-    train(0)
+    for i_epoch in range(20):
+        train(i_epoch)
+        test(i_epoch)
 
 if __name__ == '__main__':
     main()

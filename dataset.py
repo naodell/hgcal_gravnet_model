@@ -68,6 +68,7 @@ class TauDataset(Dataset):
             x = torch.from_numpy(x[order]).type(torch.float),
             y = torch.from_numpy(cluster_index[order]).type(torch.int),
             cluster_properties = torch.from_numpy(cluster_properties[order]).type(torch.float),
+            inpz = torch.Tensor(i)
             )
 
     def __len__(self):
@@ -75,15 +76,15 @@ class TauDataset(Dataset):
     def len(self):
         return len(self.npzs)
 
-    def split_off(self, fraction):
+    def split(self, fraction):
         """
         Creates two new instances of TauDataset with a fraction of events split
         """
         left = self.__class__(self.root)
         right = self.__class__(self.root)
         split_index = int(fraction*len(self))
-        left.npzs = self.npzs[:-split_index]
-        right.npzs = self.npzs[-split_index:]
+        left.npzs = self.npzs[:split_index]
+        right.npzs = self.npzs[split_index:]
         return left, right
 
 
