@@ -1,16 +1,9 @@
-from typing import Deque
 import numpy as np
-
 import torch
 from torch import Tensor
 import torch.nn as nn
-from torch.nn import Linear, ReLU
-import torch_geometric
-from torch_scatter import scatter, scatter_max, scatter_mul, scatter_add
-# from torch_geometric.nn import global_mean_pool
-from torch_geometric.data import (Data, Dataset, DataLoader)
-from torch_geometric.nn.conv.gravnet_conv import GravNetConv
-import torch_scatter
+from torch_scatter import scatter_max, scatter_add
+from torch_geometric.data import DataLoader
 
 
 def make_fake_model(output_dim: int):
@@ -22,6 +15,15 @@ def make_fake_model(output_dim: int):
         return torch.from_numpy(np.random.rand(x.size(0), output_dim)).type(torch.float)
     return fake_model
 
+def assert_no_nans(x):
+    """
+    Raises AssertionError if there is a nan in the tensor
+    """
+    assert not torch.isnan(x).any()
+
+DEBUG = True
+def debug(*args, **kwargs):
+    if DEBUG: print(*args, **kwargs)
 
 def calc_LV_Lbeta(
     beta: torch.Tensor, cluster_coords: torch.Tensor, # Predicted by model
@@ -31,6 +33,11 @@ def calc_LV_Lbeta(
     s_B: float = .1,
     bkg_cluster_index: int = 0 # cluster_index entries with this value are bkg/noise
     ):
+    assert_no_nans(beta)
+    assert_no_nans(cluster_coords)
+    assert_no_nans(batch)
+    assert_no_nans(cluster_index_per_entry)
+
     n_hits = beta.size(0)
     cluster_space_dim = cluster_coords.size(1)
     # Transform indices-per-event to indices-per-batch
@@ -38,19 +45,35 @@ def calc_LV_Lbeta(
     cluster_index, n_clusters_per_entry = batch_cluster_indices(cluster_index_per_entry, batch)
     n_clusters = cluster_index.max()+1
 
+    debug(f'\n\nIn calc_LV_Lbeta; n_hits={n_hits}, n_clusters={n_clusters}')
+
     q = beta.arctanh()**2 + qmin
+    assert_no_nans(q)
 
     # Select the maximum charge node per cluster
     q_alpha, index_alpha = scatter_max(q, cluster_index) # max q per cluster
+    assert index_alpha.size() == (n_clusters,)
+    assert_no_nans(q_alpha)
+    
+
+    debug('beta:', beta)
+    debug('q:', q)
+    debug('q_alpha:', q_alpha)
+    debug('index_alpha:', index_alpha)
+    debug('cluster_index:', cluster_index)
+
     x_alpha = cluster_coords[index_alpha]
     beta_alpha = beta[index_alpha]
+    assert_no_nans(x_alpha)
+    assert_no_nans(beta_alpha)
 
-    # print(f'n_hits={n_hits}, n_clusters={n_clusters}, cluster_space_dim={cluster_space_dim}')
-    # print(f'x_alpha.size()={x_alpha.size()}')
+    # debug(f'n_hits={n_hits}, n_clusters={n_clusters}, cluster_space_dim={cluster_space_dim}')
+    # debug(f'x_alpha.size()={x_alpha.size()}')
 
     # Copy x_alpha by n_hit rows:
     # (n_clusters x cluster_space_dim) --> (n_hits x n_clusters x cluster_space_dim)
     x_alpha_expanded = x_alpha.expand(n_hits, n_clusters, cluster_space_dim)
+    assert_no_nans(x_alpha_expanded)
 
     # Copy cluster_coord by n_cluster columns:
     # (n_hits x cluster_space_dim) --> (n_hits x n_clusters x cluster_space_dim)
@@ -58,10 +81,12 @@ def calc_LV_Lbeta(
         cluster_coords
         .repeat(1,n_clusters).reshape(n_hits, n_clusters, cluster_space_dim)
         )
+    assert_no_nans(cluster_coords_expanded)
 
     # Take the L2 norm; Resulting matrix should be n_hits x n_clusters
     norms = (cluster_coords_expanded - x_alpha_expanded).norm(dim=-1)
     assert norms.size() == (n_hits, n_clusters)
+    assert_no_nans(norms)
 
     # Index to matrix, e.g.:
     # [1, 3, 1, 0] --> [
@@ -96,6 +121,7 @@ def calc_LV_Lbeta(
     LV = torch.sum(
         q.unsqueeze(-1) * (V_belonging + V_notbelonging) / n_hits_expanded.unsqueeze(-1)
         )
+    assert_no_nans(LV)
     # Alternatively:
     # LV = torch.sum(q * (V_belonging + V_notbelonging).sum(dim=-1) / n_hits_expanded)
 
@@ -121,8 +147,10 @@ def calc_LV_Lbeta(
     nonbkg_term = ((1.-beta_alpha)/n_clusters_expanded).sum()
 
     # Final Lbeta
+    debug(f'Lp: nonbkg_term={nonbkg_term}, bkg_term={bkg_term}')
     Lbeta = nonbkg_term + bkg_term
 
+    debug(f'LV={LV}, Lbeta={Lbeta}')
     return LV, Lbeta
 
 
@@ -182,11 +210,12 @@ def calc_Lp(
     L_position = calc_L_position(pred_cluster_properties[:,2:4], truth_cluster_properties[:,2:4])
     # L_classification = calc_L_classification(pred_cluster_properties[:,4], pred_cluster_properties[:,4]) TODO
 
-    L_p = 0
+    Lp = 0
     xi_sum = xi.sum()
     for L in [ L_energy, L_time, L_position ]:
-        L_p += 1./xi_sum * (xi * L).sum()
-    return L_p
+        Lp += 1./xi_sum * (xi * L).sum()
+    print(f'Lp={Lp}')
+    return Lp
 
 
 def batch_cluster_indices(cluster_id: torch.Tensor, batch: torch.Tensor):

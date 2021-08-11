@@ -68,7 +68,7 @@ class TauDataset(Dataset):
             x = torch.from_numpy(x[order]).type(torch.float),
             y = torch.from_numpy(cluster_index[order]).type(torch.int),
             cluster_properties = torch.from_numpy(cluster_properties[order]).type(torch.float),
-            inpz = torch.Tensor(i)
+            inpz = torch.Tensor([i])
             )
 
     def __len__(self):
