@@ -9,18 +9,27 @@ from lrscheduler import CyclicLRWithRestarts
 torch.manual_seed(1009)
 
 def objectcondensation_loss(out, data, s_c=1.):
+    device = out.device
     pred_betas = torch.sigmoid(out[:,0])
     pred_cluster_space_coords = out[:,1:3]
     pred_cluster_properties = out[:,3:]
+
+    assert pred_betas.device == device
+    assert pred_cluster_space_coords.device == device
+    assert data.y.device == device
+    assert data.batch.device == device
+    assert pred_cluster_properties.device == device
+    assert data.cluster_properties.device == device
+
     LV, Lbeta = objectcondensation.calc_LV_Lbeta(
         pred_betas,
         pred_cluster_space_coords,
-        data.y.type(torch.LongTensor),
+        data.y.long(),
         data.batch
         )
     Lp = objectcondensation.calc_Lp(
         pred_betas,
-        data.y.type(torch.LongTensor),
+        data.y.long(),
         pred_cluster_properties,
         data.cluster_properties
         )
@@ -51,7 +60,7 @@ def main():
         try:
             pbar = tqdm.tqdm(train_loader, total=len(train_loader))
             pbar.set_postfix({'loss': '?'})
-            for data in pbar:
+            for i, data in enumerate(pbar):
                 data = data.to(device)
                 optimizer.zero_grad()
                 result = model(data.x, data.batch)
@@ -100,6 +109,44 @@ def debug():
             print(result)
 
 
+def run_profile():
+    from torch.profiler import profile, record_function, ProfilerActivity
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print('Using device', device)
+
+    batch_size = 2
+    n_batches = 2
+    shuffle = True
+    dataset = TauDataset('data/taus')
+    dataset.npzs = dataset.npzs[:batch_size*n_batches]
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    print(f'Running profiling for {len(dataset)} events, batch_size={batch_size}, {len(loader)} batches')
+
+    model = GravnetModel(input_dim=9, output_dim=8).to(device)
+    epoch_size = len(loader.dataset)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-7, weight_decay=1e-4)
+
+    print('Start limited training loop')
+    model.train()
+    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        with record_function("model_inference"):
+            pbar = tqdm.tqdm(loader, total=len(loader))
+            pbar.set_postfix({'loss': '?'})
+            for i, data in enumerate(pbar):
+                data = data.to(device)
+                optimizer.zero_grad()
+                result = model(data.x, data.batch)
+                loss = objectcondensation_loss(result, data)
+                print(f'loss={float(loss)}')
+                loss.backward()
+                optimizer.step()
+                pbar.set_postfix({'loss': float(loss)})
+    print(prof.key_averages().table(sort_by="cpu_time", row_limit=10))
+    # Other valid keys:
+    # cpu_time, cuda_time, cpu_time_total, cuda_time_total, cpu_memory_usage,
+    # cuda_memory_usage, self_cpu_memory_usage, self_cuda_memory_usage, count
+
 if __name__ == '__main__':
-    main()
+    # main()
     # debug()
+    run_profile()

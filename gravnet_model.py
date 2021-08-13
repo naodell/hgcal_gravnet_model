@@ -116,6 +116,7 @@ def global_exchange(x: Tensor, batch: Tensor) -> Tensor:
     Assumes x: (n_hits x n_features), batch: (n_hits),
     and that the batches are sorted!
     """
+    device = x.device
     batch_numbers, batch_counts = torch.unique(batch, return_counts=True)
     batch_size = batch_counts.size()[0]
     n_hits, n_features = x.size()
@@ -144,6 +145,8 @@ def global_exchange(x: Tensor, batch: Tensor) -> Tensor:
     # Add as columns to feature tensor
     out = torch.cat((meanminmax, x), dim=-1)
     assert out.size() == (n_hits, 4*n_features)
+
+    assert all(t.device == device for t in [batch_numbers, batch_counts, meanminmax, out, x, batch])
     return out
 
 
@@ -249,9 +252,12 @@ class GravnetModel(nn.Module):
             )
 
     def forward(self, x: Tensor, batch: Tensor) -> Tensor:
+        device = x.device
+        # print('forward called on device', device)
         x = self.batchnorm1(x)
         x = global_exchange(x, batch)
         x = self.input(x)
+        assert x.device == device
 
         x_gravnet_per_block = [] # To store intermediate outputs
         for gravnet_block in self.gravnet_blocks:
@@ -259,11 +265,12 @@ class GravnetModel(nn.Module):
             x_gravnet_per_block.append(x)
         x = torch.cat(x_gravnet_per_block, dim=-1)
         assert x.size() == (x.size(0), 4*96)
+        assert x.device == device
 
         x = self.postgn_dense(x)
         x = self.output(x)
+        assert x.device == device
         return x
-
 
 
 def test_model_sizes():

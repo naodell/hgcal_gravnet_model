@@ -33,6 +33,9 @@ def calc_LV_Lbeta(
     s_B: float = .1,
     bkg_cluster_index: int = 0 # cluster_index entries with this value are bkg/noise
     ):
+    device = beta.device
+
+    assert all(t.device == device for t in [beta, cluster_coords, cluster_index_per_entry, batch])
     assert_no_nans(beta)
     assert_no_nans(cluster_coords)
     assert_no_nans(batch)
@@ -43,27 +46,36 @@ def calc_LV_Lbeta(
     # Transform indices-per-event to indices-per-batch
     # E.g. [ 0, 0, 1, 2, 0, 0, 1] -> [ 0, 0, 1, 2, 3, 3, 4 ]
     cluster_index, n_clusters_per_entry = batch_cluster_indices(cluster_index_per_entry, batch)
+
+    assert cluster_index.device == device
+    assert n_clusters_per_entry.device == device
+
     n_clusters = cluster_index.max()+1
 
     debug(f'\n\nIn calc_LV_Lbeta; n_hits={n_hits}, n_clusters={n_clusters}')
 
     q = beta.arctanh()**2 + qmin
     assert_no_nans(q)
+    assert q.device == device
 
     # Select the maximum charge node per cluster
     q_alpha, index_alpha = scatter_max(q, cluster_index) # max q per cluster
     assert index_alpha.size() == (n_clusters,)
     assert_no_nans(q_alpha)
-    
+    assert q_alpha.device == device
+    assert index_alpha.device == device
 
-    debug('beta:', beta)
-    debug('q:', q)
-    debug('q_alpha:', q_alpha)
-    debug('index_alpha:', index_alpha)
-    debug('cluster_index:', cluster_index)
+    # debug('beta:', beta)
+    # debug('q:', q)
+    # debug('q_alpha:', q_alpha)
+    # debug('index_alpha:', index_alpha)
+    # debug('cluster_index:', cluster_index)
 
     x_alpha = cluster_coords[index_alpha]
     beta_alpha = beta[index_alpha]
+
+    assert x_alpha.device == device
+    assert beta_alpha.device == device
     assert_no_nans(x_alpha)
     assert_no_nans(beta_alpha)
 
@@ -74,6 +86,7 @@ def calc_LV_Lbeta(
     # (n_clusters x cluster_space_dim) --> (n_hits x n_clusters x cluster_space_dim)
     x_alpha_expanded = x_alpha.expand(n_hits, n_clusters, cluster_space_dim)
     assert_no_nans(x_alpha_expanded)
+    assert x_alpha_expanded.device == device
 
     # Copy cluster_coord by n_cluster columns:
     # (n_hits x cluster_space_dim) --> (n_hits x n_clusters x cluster_space_dim)
@@ -81,12 +94,14 @@ def calc_LV_Lbeta(
         cluster_coords
         .repeat(1,n_clusters).reshape(n_hits, n_clusters, cluster_space_dim)
         )
+    assert cluster_coords_expanded.device == device
     assert_no_nans(cluster_coords_expanded)
 
     # Take the L2 norm; Resulting matrix should be n_hits x n_clusters
     norms = (cluster_coords_expanded - x_alpha_expanded).norm(dim=-1)
     assert norms.size() == (n_hits, n_clusters)
     assert_no_nans(norms)
+    assert norms.device == device
 
     # Index to matrix, e.g.:
     # [1, 3, 1, 0] --> [
@@ -96,23 +111,29 @@ def calc_LV_Lbeta(
     #     [1, 0, 0, 0]
     #     ]
     M = torch.nn.functional.one_hot(cluster_index)
+    assert M.device == device
 
     # Copy q_alpha by n_hit rows:
     # (n_clusters) --> (n_hits x n_clusters)
     q_alpha_expanded = q_alpha.expand(n_hits, -1)
+    assert q_alpha_expanded.device == device
 
     # Potential for hits w.r.t. the cluster they belong to
     V_belonging = M * q_alpha_expanded * norms**2
+    assert V_belonging.device == device
 
     # Potential for hits w.r.t. the cluster they DO NOT belong to
     V_notbelonging = 1. - (1-M) * q_alpha_expanded * norms
     V_notbelonging[V_notbelonging < 0.] = 0. # Min of 0
+    assert V_notbelonging.device == device
 
     # Count n_hits per entry in the batch (batch_size)
     _, n_hits_per_entry = torch.unique(batch, return_counts=True)
+    assert n_hits_per_entry.device == device
     # Expand: (batch_size) --> (nhits)
     # e.g. [2, 3, 1] --> [2, 2, 3, 3, 3, 1]
-    n_hits_expanded = torch.gather(n_hits_per_entry, 0, batch).type(torch.LongTensor)
+    n_hits_expanded = torch.gather(n_hits_per_entry, 0, batch).long()
+    assert n_hits_expanded.device == device
     # Alternatively, this should give the same:
     # n_hits_expanded = torch.repeat_interleave(n_hits_per_entry, n_hits_per_entry)
 
@@ -121,6 +142,7 @@ def calc_LV_Lbeta(
     LV = torch.sum(
         q.unsqueeze(-1) * (V_belonging + V_notbelonging) / n_hits_expanded.unsqueeze(-1)
         )
+    assert LV.device == device
     assert_no_nans(LV)
     # Alternatively:
     # LV = torch.sum(q * (V_belonging + V_notbelonging).sum(dim=-1) / n_hits_expanded)
@@ -133,11 +155,15 @@ def calc_LV_Lbeta(
     # point would be better design.
 
     is_bkg = cluster_index_per_entry == bkg_cluster_index
+    assert is_bkg.device == device
     N_B = scatter_add(is_bkg, batch) # (batch_size)
+    assert N_B.device == device
     # Expand (batch_size) -> (n_hits)
     # e.g. [ 3, 2 ], [0, 0, 0, 0, 0, 1, 1, 1, 1] -> [3, 3, 3, 3, 3, 2, 2, 2, 2]
-    N_B_expanded = torch.gather(N_B, 0, batch).type(torch.LongTensor)
+    N_B_expanded = torch.gather(N_B, 0, batch).long()
+    assert N_B_expanded.device == device
     bkg_term = s_B * (N_B_expanded*beta)[is_bkg].sum()
+    assert bkg_term.device == device
 
     # n_clusters_per_entry: (batch_size)
     # (batch_size) --> (n_clusters)
@@ -230,15 +256,17 @@ def batch_cluster_indices(cluster_id: torch.Tensor, batch: torch.Tensor):
     offset = torch.LongTensor([0, 0, 0, 0, 0, 3, 3, 3, 3, 3, 5, 5, 5])
     output = torch.LongTensor([0, 0, 1, 1, 2, 3, 3, 4, 4, 4, 5, 5, 6])
     """
+    device = cluster_id.device
+    assert cluster_id.device == batch.device
     # Count the number of clusters per entry in the batch
     n_clusters_per_event = scatter_max(cluster_id, batch, dim=-1)[0] + 1
     # Offsets are then a cumulative sum
     offset_values_nozero = n_clusters_per_event[:-1].cumsum(dim=-1)
     # Prefix a zero
-    offset_values = torch.zeros(offset_values_nozero.size(0)+1)
+    offset_values = torch.zeros(offset_values_nozero.size(0)+1, device=device)
     offset_values[1:] = offset_values_nozero
     # Fill it per hit
-    offset = torch.gather(offset_values, 0, batch).type(torch.LongTensor)
+    offset = torch.gather(offset_values, 0, batch).long()
     return offset + cluster_id, n_clusters_per_event
 
 
