@@ -1,3 +1,4 @@
+from os, os.path as osp, time import strftime
 import tqdm
 import torch
 from torch_geometric.data import DataLoader
@@ -65,7 +66,6 @@ def main():
                 optimizer.zero_grad()
                 result = model(data.x, data.batch)
                 loss = objectcondensation_loss(result, data)
-                print(f'loss={float(loss)}')
                 loss.backward()
                 optimizer.step()
                 # scheduler.batch_step()
@@ -85,10 +85,25 @@ def main():
                 loss += objectcondensation_loss(result, data)
             loss /= len(test_loader)
             print(f'Avg test loss: {loss}')
+        return loss
 
+    ckpt_dir = strftime('ckpts_gravnet_%b%d')
+    def write_checkpoint(checkpoint_number=None, best=False):
+        ckpt = 'ckpt_best.pth.tar' if best else 'ckpt_{0}.pth.tar'.format(checkpoint_number)
+        ckpt = osp.join(ckpt_dir, ckpt)
+        if best: print('Saving epoch {0} as new best'.format(checkpoint_number))
+        if do_checkpoints:
+            os.makedirs(ckpt_dir, exist_ok=True)
+            torch.save(dict(model=model.state_dict()), ckpt)
+
+    min_loss = 1e9
     for i_epoch in range(20):
         train(i_epoch)
-        test(i_epoch)
+        write_checkpoint(i_epoch)
+        test_loss = test(i_epoch)
+        if test_loss < min_loss:
+            min_loss = test_loss
+            write_checkpoint(i_epoch, best=True)
 
 def debug():
     dataset = TauDataset('data/taus')
@@ -147,6 +162,6 @@ def run_profile():
     # cuda_memory_usage, self_cpu_memory_usage, self_cuda_memory_usage, count
 
 if __name__ == '__main__':
-    # main()
+    main()
     # debug()
-    run_profile()
+    # run_profile()

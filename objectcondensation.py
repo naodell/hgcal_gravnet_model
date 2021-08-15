@@ -21,7 +21,7 @@ def assert_no_nans(x):
     """
     assert not torch.isnan(x).any()
 
-DEBUG = True
+DEBUG = False
 def debug(*args, **kwargs):
     if DEBUG: print(*args, **kwargs)
 
@@ -240,7 +240,7 @@ def calc_Lp(
     xi_sum = xi.sum()
     for L in [ L_energy, L_time, L_position ]:
         Lp += 1./xi_sum * (xi * L).sum()
-    print(f'Lp={Lp}')
+    debug(f'Lp={Lp}')
     return Lp
 
 
