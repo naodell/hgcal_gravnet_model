@@ -1,4 +1,5 @@
-from os, os.path as osp, time import strftime
+import os, os.path as osp
+from time import strftime
 import tqdm
 import torch
 from torch_geometric.data import DataLoader
@@ -41,9 +42,13 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device', device)
 
+    do_checkpoints = True
+    n_epochs = 400
     batch_size = 4
+
     shuffle = True
-    dataset, _ = TauDataset('data/taus').split(.1)
+    # dataset, _ = TauDataset('data/taus').split(.1) # Only use 10% for debugging
+    dataset = TauDataset('data/taus')
     train_dataset, test_dataset = dataset.split(.8)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle)
@@ -51,7 +56,7 @@ def main():
     model = GravnetModel(input_dim=9, output_dim=8).to(device)
 
     epoch_size = len(train_loader.dataset)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-7, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
     # scheduler = CyclicLRWithRestarts(optimizer, batch_size, epoch_size, restart_period=400, t_mult=1.1, policy="cosine")
 
     def train(epoch):
@@ -97,7 +102,7 @@ def main():
             torch.save(dict(model=model.state_dict()), ckpt)
 
     min_loss = 1e9
-    for i_epoch in range(20):
+    for i_epoch in range(n_epochs):
         train(i_epoch)
         write_checkpoint(i_epoch)
         test_loss = test(i_epoch)
