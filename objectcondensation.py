@@ -300,8 +300,114 @@ def test_calc_Lp():
         print(Lp)
         break
 
+
+def get_clustering_np(betas: np.array, X: np.array, tbeta=.1, td=2.):
+    n_points = betas.shape[0]
+    select_condpoints = betas > tbeta
+    # Get indices passing the threshold
+    indices_condpoints = np.nonzero(select_condpoints)[0]
+    # Order them by decreasing beta value
+    indices_condpoints = indices_condpoints[np.argsort(-betas[select_condpoints])]
+    # Assign points to condensation points
+    # Only assign previously unassigned points (no overwriting)
+    # Points unassigned at the end are bkg (-1)
+    unassigned = np.arange(n_points)
+    clustering = -1 * np.ones(n_points, dtype=np.int32)
+    for index_condpoint in indices_condpoints:
+        d = np.linalg.norm(X[unassigned] - X[index_condpoint], axis=-1)
+        assigned_to_this_condpoint = unassigned[d < td]
+        clustering[assigned_to_this_condpoint] = index_condpoint
+        unassigned = unassigned[~(d < td)]
+    return clustering
+
+
+def get_clustering(betas: torch.Tensor, X: torch.Tensor, tbeta=.1, td=2.):
+    n_points = betas.size(0)
+    select_condpoints = betas > tbeta
+    # Get indices passing the threshold
+    indices_condpoints = select_condpoints.nonzero()
+    # Order them by decreasing beta value
+    indices_condpoints = indices_condpoints[(-betas[select_condpoints]).argsort()]
+    # Assign points to condensation points
+    # Only assign previously unassigned points (no overwriting)
+    # Points unassigned at the end are bkg (-1)
+    unassigned = torch.arange(n_points)
+    clustering = -1 * torch.ones(n_points, dtype=torch.long)
+    for index_condpoint in indices_condpoints:
+        d = torch.norm(X[unassigned] - X[index_condpoint], dim=-1)
+        assigned_to_this_condpoint = unassigned[d < td]
+        clustering[assigned_to_this_condpoint] = index_condpoint
+        unassigned = unassigned[~(d < td)]
+    return clustering
+
+
+def generate_fake_betas_and_coords(N=20, n_centers=2, cluster_space_dim=2, seed=1, add_background=True):
+    from sklearn.datasets import make_blobs
+    X, y = make_blobs(
+        n_samples=N,
+        centers=n_centers, n_features=cluster_space_dim,
+        random_state=seed
+        )
+    centers = []
+    # y consists of numbers from 0 to n_centers, not indices
+    y_indexed = np.zeros_like(y)
+    # Pick centers: Find closest point to geometrical center
+    for i_center in range(n_centers):
+        x = X[y==i_center]
+        closest = np.argmin(np.linalg.norm(x - np.mean(x, axis=0), axis=-1))
+        # This index is for only points that belong to this center;
+        # transform it back to an index of all points
+        global_index = np.nonzero(y==i_center)[0][closest]
+        np.testing.assert_array_equal(X[global_index], x[closest])
+        centers.append(global_index)
+        y_indexed[y==i_center] = global_index
+
+    centers = np.array(centers)
+    # Generate some betas: random, except the center indices get a high value
+    betas = 1e-3*np.random.rand(N)
+    betas[centers] += 0.1 + 1e-3*np.random.rand(n_centers)
+    return betas, X, y_indexed
+
+def add_background(betas, X, y, N=20):
+    cluster_space_dim = X.shape[1]
+    # Get dimensions of the clustering space
+    cluster_space_min = np.min(X, axis=0)
+    cluster_space_max = np.max(X, axis=0)
+    cluster_space_width = cluster_space_max - cluster_space_min
+    # Generate background: distributed anywhere except close to the centers
+    # Loop for 100*N, but break at N successfully generated bkg points
+    x_centers = X[np.unique(y)]
+    x_noise = []
+    for i in range(100*N):
+        p = cluster_space_min + np.random.rand(cluster_space_dim)*cluster_space_width
+        d = np.linalg.norm(p - x_centers, axis=-1)
+        if np.all(d > 3.): x_noise.append(p)
+        if len(x_noise) == N: break
+    else:
+        print(f'Warning: Generated only {len(x_noise)} bkg points, N={N} where requested')
+    x_noise = np.array(x_noise)
+    n_noise = x_noise.shape[0]
+    # Add to the input arrays
+    X = np.concatenate((X, x_noise))
+    y = np.concatenate((y, -1*np.ones(n_noise, dtype=np.int32)))
+    betas = np.concatenate((betas, 1e-3*np.random.rand(n_noise)))
+    return betas, X, y
+
+
+def test_get_clustering():
+    betas, X, y = add_background(*generate_fake_betas_and_coords(n_centers=3), 20)
+    clustering_np = get_clustering_np(betas, X, td=3.)
+    print(y)
+    print(clustering_np)
+    np.testing.assert_array_equal(y, clustering_np)
+    clustering_torch = get_clustering(torch.from_numpy(betas), torch.from_numpy(X), td=3.).numpy()
+    print(clustering_torch)
+    np.testing.assert_array_equal(y, clustering_torch)
+
+
 def main():
-    pass
+    # pass
+    test_get_clustering()
 
 if __name__ == '__main__':
     main()
