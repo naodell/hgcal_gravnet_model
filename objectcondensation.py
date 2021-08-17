@@ -27,29 +27,41 @@ def debug(*args, **kwargs):
 
 def calc_LV_Lbeta(
     beta: torch.Tensor, cluster_coords: torch.Tensor, # Predicted by model
-    cluster_index_per_entry: torch.Tensor, # Truth hit->cluster index
+    cluster_index_per_event: torch.Tensor, # Truth hit->cluster index
     batch: torch.Tensor,
     qmin: float = .1,
     s_B: float = .1,
     bkg_cluster_index: int = 0 # cluster_index entries with this value are bkg/noise
     ):
+    # First do some device assertions
     device = beta.device
-
-    assert all(t.device == device for t in [beta, cluster_coords, cluster_index_per_entry, batch])
+    assert all(t.device == device for t in [beta, cluster_coords, cluster_index_per_event, batch])
     assert_no_nans(beta)
     assert_no_nans(cluster_coords)
     assert_no_nans(batch)
-    assert_no_nans(cluster_index_per_entry)
+    assert_no_nans(cluster_index_per_event)
 
+    # Some fixed event quantities
     n_hits = beta.size(0)
     cluster_space_dim = cluster_coords.size(1)
+
     # Transform indices-per-event to indices-per-batch
     # E.g. [ 0, 0, 1, 2, 0, 0, 1] -> [ 0, 0, 1, 2, 3, 3, 4 ]
-    cluster_index, n_clusters_per_entry = batch_cluster_indices(cluster_index_per_entry, batch)
-
+    # or for non-ordered:
+    # truth clus index: [1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 2]
+    # batch:            [2, 1, 1, 2, 1, 1, 2, 0, 0, 0, 1, 0, 0]
+    # output:           [6, 3, 4, 5, 3, 4, 5, 1, 0, 1, 4, 0, 2]
+    cluster_index, n_clusters_per_event = batch_cluster_indices(cluster_index_per_event, batch)
     assert cluster_index.device == device
-    assert n_clusters_per_entry.device == device
+    assert n_clusters_per_event.device == device
 
+    # Sort all hits by this properly-offset cluster_index
+    order = cluster_index.argsort()
+    beta = beta[order]
+    cluster_coords = cluster_coords[order]
+    cluster_index_per_event = cluster_index_per_event[order]
+    batch = batch[order]
+    cluster_index = cluster_index[order]
     n_clusters = cluster_index.max()+1
 
     debug(f'\n\nIn calc_LV_Lbeta; n_hits={n_hits}, n_clusters={n_clusters}')
@@ -65,11 +77,12 @@ def calc_LV_Lbeta(
     assert q_alpha.device == device
     assert index_alpha.device == device
 
-    # debug('beta:', beta)
-    # debug('q:', q)
-    # debug('q_alpha:', q_alpha)
-    # debug('index_alpha:', index_alpha)
-    # debug('cluster_index:', cluster_index)
+    debug('beta:', beta)
+    debug('q:', q)
+    debug('q_alpha:', q_alpha)
+    debug('index_alpha:', index_alpha)
+    debug('cluster_index:', cluster_index)
+    debug('cluster_index_per_event:', cluster_index_per_event)
 
     x_alpha = cluster_coords[index_alpha]
     beta_alpha = beta[index_alpha]
@@ -128,14 +141,14 @@ def calc_LV_Lbeta(
     assert V_notbelonging.device == device
 
     # Count n_hits per entry in the batch (batch_size)
-    _, n_hits_per_entry = torch.unique(batch, return_counts=True)
-    assert n_hits_per_entry.device == device
+    _, n_hits_per_event = torch.unique(batch, return_counts=True)
+    assert n_hits_per_event.device == device
     # Expand: (batch_size) --> (nhits)
     # e.g. [2, 3, 1] --> [2, 2, 3, 3, 3, 1]
-    n_hits_expanded = torch.gather(n_hits_per_entry, 0, batch).long()
+    n_hits_expanded = torch.gather(n_hits_per_event, 0, batch).long()
     assert n_hits_expanded.device == device
     # Alternatively, this should give the same:
-    # n_hits_expanded = torch.repeat_interleave(n_hits_per_entry, n_hits_per_entry)
+    # n_hits_expanded = torch.repeat_interleave(n_hits_per_event, n_hits_per_event)
 
     # Final LV value:
     # (n_hits x 1) * (n_hits x n_clusters) / (n_hits x 1) --> float
@@ -154,7 +167,7 @@ def calc_LV_Lbeta(
     # calculate it here. Moving it to a dedicated function at some
     # point would be better design.
 
-    is_bkg = cluster_index_per_entry == bkg_cluster_index
+    is_bkg = cluster_index_per_event == bkg_cluster_index
     assert is_bkg.device == device
     N_B = scatter_add(is_bkg, batch) # (batch_size)
     assert N_B.device == device
@@ -165,18 +178,16 @@ def calc_LV_Lbeta(
     bkg_term = s_B * (N_B_expanded*beta)[is_bkg].sum()
     assert bkg_term.device == device
 
-    # n_clusters_per_entry: (batch_size)
+    # n_clusters_per_event: (batch_size)
     # (batch_size) --> (n_clusters)
     # e.g. [3, 2] --> [3, 3, 3, 2, 2]
-    n_clusters_expanded = torch.repeat_interleave(n_clusters_per_entry, n_clusters_per_entry)
+    n_clusters_expanded = torch.repeat_interleave(n_clusters_per_event, n_clusters_per_event)
     assert n_clusters_expanded.size() == (n_clusters,)
     nonbkg_term = ((1.-beta_alpha)/n_clusters_expanded).sum()
 
     # Final Lbeta
-    debug(f'Lp: nonbkg_term={nonbkg_term}, bkg_term={bkg_term}')
     Lbeta = nonbkg_term + bkg_term
-
-    debug(f'LV={LV}, Lbeta={Lbeta}')
+    debug(f'LV={LV:.6f}, Lbeta={Lbeta:.6f} (nonbkg={nonbkg_term:.4f}, bkg={bkg_term:.4f})')
     return LV, Lbeta
 
 
@@ -270,6 +281,24 @@ def batch_cluster_indices(cluster_id: torch.Tensor, batch: torch.Tensor):
     return offset + cluster_id, n_clusters_per_event
 
 
+def test_batch_cluster_indices():
+    cluster_id = torch.LongTensor([0, 0, 1, 1, 2, 0, 0, 1, 1, 1, 0, 0, 1])
+    batch = torch.LongTensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2])
+    output = torch.LongTensor([0, 0, 1, 1, 2, 3, 3, 4, 4, 4, 5, 5, 6])
+    assert torch.all(torch.isclose(batch_cluster_indices(cluster_id, batch)[0], output))
+    # Should also work fine with randomly shuffled data:
+    shuffle = torch.randperm(cluster_id.size(0))
+    assert torch.all(torch.isclose(
+        batch_cluster_indices(cluster_id[shuffle], batch[shuffle])[0],
+        output[shuffle]
+        ))
+    print(cluster_id[shuffle])
+    print(batch[shuffle])
+    print(batch_cluster_indices(cluster_id[shuffle], batch[shuffle])[0])
+    print(output[shuffle])
+
+
+
 def test_calc_LV_Lbeta():
     from gravnet_model import logger, debug, FakeDataset
     batch_size = 4
@@ -341,18 +370,18 @@ def get_clustering(betas: torch.Tensor, X: torch.Tensor, tbeta=.1, td=2.):
     return clustering
 
 
-def generate_fake_betas_and_coords(N=20, n_centers=2, cluster_space_dim=2, seed=1, add_background=True):
+def generate_fake_betas_and_coords(N=20, n_clusters=2, cluster_space_dim=2, seed=1, add_background=True):
     from sklearn.datasets import make_blobs
     X, y = make_blobs(
         n_samples=N,
-        centers=n_centers, n_features=cluster_space_dim,
+        centers=n_clusters, n_features=cluster_space_dim,
         random_state=seed
         )
     centers = []
-    # y consists of numbers from 0 to n_centers, not indices
+    # y consists of numbers from 0 to n_clusters, not indices
     y_indexed = np.zeros_like(y)
     # Pick centers: Find closest point to geometrical center
-    for i_center in range(n_centers):
+    for i_center in range(n_clusters):
         x = X[y==i_center]
         closest = np.argmin(np.linalg.norm(x - np.mean(x, axis=0), axis=-1))
         # This index is for only points that belong to this center;
@@ -361,12 +390,12 @@ def generate_fake_betas_and_coords(N=20, n_centers=2, cluster_space_dim=2, seed=
         np.testing.assert_array_equal(X[global_index], x[closest])
         centers.append(global_index)
         y_indexed[y==i_center] = global_index
-
     centers = np.array(centers)
     # Generate some betas: random, except the center indices get a high value
     betas = 1e-3*np.random.rand(N)
-    betas[centers] += 0.1 + 1e-3*np.random.rand(n_centers)
+    betas[centers] += 0.1 + 1e-3*np.random.rand(n_clusters)
     return betas, X, y_indexed
+
 
 def add_background(betas, X, y, N=20):
     cluster_space_dim = X.shape[1]
@@ -387,15 +416,17 @@ def add_background(betas, X, y, N=20):
         print(f'Warning: Generated only {len(x_noise)} bkg points, N={N} where requested')
     x_noise = np.array(x_noise)
     n_noise = x_noise.shape[0]
-    # Add to the input arrays
-    X = np.concatenate((X, x_noise))
-    y = np.concatenate((y, -1*np.ones(n_noise, dtype=np.int32)))
-    betas = np.concatenate((betas, 1e-3*np.random.rand(n_noise)))
+    if n_noise > 0:
+        shuffle = np.random.permutation(X.shape[0] + n_noise)
+        # Add to the input arrays
+        X = np.concatenate((X, x_noise))[shuffle]
+        y = np.concatenate((y, -1*np.ones(n_noise, dtype=np.int32)))[shuffle]
+        betas = np.concatenate((betas, 1e-3*np.random.rand(n_noise)))[shuffle]
     return betas, X, y
 
 
 def test_get_clustering():
-    betas, X, y = add_background(*generate_fake_betas_and_coords(n_centers=3), 20)
+    betas, X, y = add_background(*generate_fake_betas_and_coords(n_clusters=3), 20)
     clustering_np = get_clustering_np(betas, X, td=3.)
     print(y)
     print(clustering_np)
@@ -407,7 +438,8 @@ def test_get_clustering():
 
 def main():
     # pass
-    test_get_clustering()
+    # test_get_clustering()
+    test_batch_cluster_indices()
 
 if __name__ == '__main__':
     main()

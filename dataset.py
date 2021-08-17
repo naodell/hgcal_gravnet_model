@@ -9,6 +9,8 @@ from torch.nn import Linear, ReLU
 from torch_scatter import scatter
 from torch_geometric.data import (Data, Dataset, DataLoader, dataloader)
 
+from sklearn.datasets import make_blobs
+
 
 class FakeDataset(Dataset):
     """
@@ -46,6 +48,62 @@ class FakeDataset(Dataset):
     def len(self):
         return self.n_events
 
+
+class BlobsDataset(Dataset):
+    """
+    Dataset around sklearn.datasets.make_blobs
+    """
+    
+    def __init__(self, n_events=100):
+        super(BlobsDataset, self).__init__('nofile')
+        self.cache = {}
+        self.n_events = n_events
+        self.cluster_space_dim = 2
+
+    def get(self, i):
+        if i >= self.n_events: raise IndexError
+        if i not in self.cache:
+            n_hits = np.random.randint(50, 70)
+            n_clusters = min(np.random.randint(2, 4), n_hits)
+            n_bkg = np.random.randint(10, 20)
+            # Generate the 'signal'
+            X, y = make_blobs(
+                n_samples=n_hits,
+                centers=n_clusters, n_features=self.cluster_space_dim,
+                random_state=i
+                )
+            y += 1 # To reserve index 0 for background
+            # Add background
+            cluster_space_min = np.min(X, axis=0)
+            cluster_space_max = np.max(X, axis=0)
+            cluster_space_width = cluster_space_max - cluster_space_min
+            X_bkg = cluster_space_min + np.random.rand(n_bkg, self.cluster_space_dim)*cluster_space_width
+            y_bkg = np.zeros(n_bkg)
+            X = np.concatenate((X,X_bkg))
+            y = np.concatenate((y,y_bkg))
+            # Calculate geom centers
+            truth_cluster_props = np.zeros((n_hits+n_bkg,2))
+            for i in range(1,n_clusters+1):
+                truth_cluster_props[y==i] = np.mean(X[y==i], axis=0)
+            # shuffle
+            order = np.random.permutation(n_hits+n_bkg)
+            # order = y.argsort()
+            X = X[order]
+            y = y[order]
+            truth_cluster_props = truth_cluster_props[order]
+            self.cache[i] = Data(
+                x = torch.from_numpy(X).float(),
+                y = torch.from_numpy(y).long(),
+                truth_cluster_props = torch.from_numpy(truth_cluster_props).float()
+                )
+        return self.cache[i]
+
+    def __len__(self):
+        return self.n_events
+
+    def len(self):
+        return self.n_events
+        
 
 class TauDataset(Dataset):
     def __init__(self, path):
@@ -104,6 +162,7 @@ def incremental_cluster_index(cluster_index_nonzeroindices, noise_index=-1):
 
     return cluster_index
 
+
 def test_ordered_cluster_index():
     a = [ -1, -1, 13, -1, 13, 13, 42, -1, -1]
     b = [ 0, 0, 1, 0, 1, 1, 2, 0, 0 ]
@@ -111,7 +170,6 @@ def test_ordered_cluster_index():
 
 
 def test_full_chain():
-
     dataset = TauDataset('data/taus')
     print(dataset.get(0))
     dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
@@ -155,8 +213,41 @@ def test_full_chain():
     print(Lp)
 
 
+def test_blobs():
+    dataloader = DataLoader(BlobsDataset(4), batch_size=2, shuffle=True)
+    from gravnet_model import GravnetModel
+    model = GravnetModel(input_dim=2, output_dim=5)
+
+    for data in dataloader:
+        print(f'Sending data {data}')
+        out = model(data.x, data.batch)
+        break
+
+    betas = torch.sigmoid(out[:,0])
+    cluster_space_coordinates = out[:,1:3]
+    pred_cluster_properties = out[:,3:]
+
+    print(betas)
+
+    from objectcondensation import calc_LV_Lbeta, calc_L_energy, calc_Lp
+    import objectcondensation
+    objectcondensation.DEBUG = True
+
+    LV, Lbeta = calc_LV_Lbeta(
+        betas,
+        cluster_space_coordinates,
+        data.y.long(),
+        data.batch,
+        bkg_cluster_index=0
+        )
+    print(LV, Lbeta)
+
+
+
+
 def main():
-    test_full_chain()
+    # test_full_chain()
+    test_blobs()
 
 if __name__ == '__main__':
     main()
