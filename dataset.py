@@ -54,11 +54,12 @@ class BlobsDataset(Dataset):
     Dataset around sklearn.datasets.make_blobs
     """
     
-    def __init__(self, n_events=100):
+    def __init__(self, n_events=100, seed_offset=0):
         super(BlobsDataset, self).__init__('nofile')
         self.cache = {}
         self.n_events = n_events
         self.cluster_space_dim = 2
+        self.seed_offset = seed_offset
 
     def get(self, i):
         if i >= self.n_events: raise IndexError
@@ -70,7 +71,7 @@ class BlobsDataset(Dataset):
             X, y = make_blobs(
                 n_samples=n_hits,
                 centers=n_clusters, n_features=self.cluster_space_dim,
-                random_state=i
+                random_state=i+self.seed_offset
                 )
             y += 1 # To reserve index 0 for background
             # Add background
