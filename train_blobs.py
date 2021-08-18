@@ -15,8 +15,8 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device', device)
 
-    # do_checkpoints = True
-    do_checkpoints = False
+    do_checkpoints = True
+    # do_checkpoints = False
     n_epochs = 400
     batch_size = 64
 

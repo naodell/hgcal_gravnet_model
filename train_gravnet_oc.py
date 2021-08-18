@@ -10,54 +10,53 @@ from lrscheduler import CyclicLRWithRestarts
 
 torch.manual_seed(1009)
 
-def objectcondensation_loss(out, data, s_c=1.):
-    device = out.device
-    pred_betas = torch.sigmoid(out[:,0])
-    pred_cluster_space_coords = out[:,1:3]
-    pred_cluster_properties = out[:,3:]
-
-    assert pred_betas.device == device
-    assert pred_cluster_space_coords.device == device
-    assert data.y.device == device
-    assert data.batch.device == device
-    assert pred_cluster_properties.device == device
-    assert data.cluster_properties.device == device
-
-    LV, Lbeta = objectcondensation.calc_LV_Lbeta(
-        pred_betas,
-        pred_cluster_space_coords,
-        data.y.long(),
-        data.batch
-        )
-    Lp = objectcondensation.calc_Lp(
-        pred_betas,
-        data.y.long(),
-        pred_cluster_properties,
-        data.cluster_properties
-        )
-    return Lp + s_c*(LV + Lbeta)
-
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device', device)
 
     do_checkpoints = True
+    # do_checkpoints = False
     n_epochs = 400
     batch_size = 4
 
     shuffle = True
-    # dataset, _ = TauDataset('data/taus').split(.1) # Only use 10% for debugging
+    # dataset, _ = TauDataset('data/taus').split(.01) # Only use 10% for debugging
     dataset = TauDataset('data/taus')
     train_dataset, test_dataset = dataset.split(.8)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle)
 
-    model = GravnetModel(input_dim=9, output_dim=8).to(device)
+    model = GravnetModel(input_dim=9, output_dim=5).to(device)
 
     epoch_size = len(train_loader.dataset)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
     # scheduler = CyclicLRWithRestarts(optimizer, batch_size, epoch_size, restart_period=400, t_mult=1.1, policy="cosine")
+
+    def loss_fn(out, data, s_c=1.):
+        device = out.device
+        pred_betas = torch.sigmoid(out[:,0])
+        pred_cluster_space_coords = out[:,1:5]
+        # pred_cluster_properties = out[:,3:]
+        assert all(t.device == device for t in [
+            pred_betas, pred_cluster_space_coords, data.y,
+            data.batch,
+            # pred_cluster_properties, data.truth_cluster_props
+            ])
+        LV, Lbeta = objectcondensation.calc_LV_Lbeta(
+            pred_betas,
+            pred_cluster_space_coords,
+            data.y.long(),
+            data.batch
+            )
+        return LV + Lbeta
+        # Lp = objectcondensation.calc_Lp(
+        #     pred_betas,
+        #     data.y.long(),
+        #     pred_cluster_properties,
+        #     data.truth_cluster_props
+        #     )
+        # return Lp + s_c*(LV + Lbeta)
 
     def train(epoch):
         print('Training epoch', epoch)
@@ -70,7 +69,7 @@ def main():
                 data = data.to(device)
                 optimizer.zero_grad()
                 result = model(data.x, data.batch)
-                loss = objectcondensation_loss(result, data)
+                loss = loss_fn(result, data)
                 loss.backward()
                 optimizer.step()
                 # scheduler.batch_step()
@@ -87,7 +86,7 @@ def main():
             for data in tqdm.tqdm(test_loader, total=len(test_loader)):
                 data = data.to(device)
                 result = model(data.x, data.batch)
-                loss += objectcondensation_loss(result, data)
+                loss += loss_fn(result, data)
             loss /= len(test_loader)
             print(f'Avg test loss: {loss}')
         return loss
@@ -125,7 +124,7 @@ def debug():
         model.eval()
         for data in loader:
             result = model(data.x, data.batch)
-            loss = objectcondensation_loss(result, data)
+            loss = loss_fn(result, data)
             print(result)
 
 
@@ -156,7 +155,7 @@ def run_profile():
                 data = data.to(device)
                 optimizer.zero_grad()
                 result = model(data.x, data.batch)
-                loss = objectcondensation_loss(result, data)
+                loss = loss_fn(result, data)
                 print(f'loss={float(loss)}')
                 loss.backward()
                 optimizer.step()

@@ -115,18 +115,18 @@ class TauDataset(Dataset):
         d = np.load(self.npzs[i])
         x = d['recHitFeatures']
         cluster_index = incremental_cluster_index(d['recHitTruthClusterIdx'].squeeze())
-        cluster_properties = np.hstack((
+        truth_cluster_props = np.hstack((
             d['recHitTruthEnergy'],
             d['recHitTruthPosition'],
             d['recHitTruthTime'],
             d['recHitTruthID'],
             ))
-        assert cluster_properties.shape == (x.shape[0], 5)
+        assert truth_cluster_props.shape == (x.shape[0], 5)
         order = cluster_index.argsort()
         return Data(
             x = torch.from_numpy(x[order]).type(torch.float),
             y = torch.from_numpy(cluster_index[order]).type(torch.int),
-            cluster_properties = torch.from_numpy(cluster_properties[order]).type(torch.float),
+            truth_cluster_props = torch.from_numpy(truth_cluster_props[order]).type(torch.float),
             inpz = torch.Tensor([i])
             )
 
