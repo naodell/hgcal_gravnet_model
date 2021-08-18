@@ -35,7 +35,7 @@ class ColorWheel:
 def get_plotly_pred(event, clustering):
     import plotly.graph_objects as go
     colorwheel = ColorWheel()
-    colorwheel.assign(-1, '#929591')
+    colorwheel.assign(-1, '#bfbfbf')
 
     data = []
     energies = event.x[:,0].numpy()
@@ -51,7 +51,7 @@ def get_plotly_pred(event, clustering):
             marker=dict(
                 line=dict(width=0),
                 size=sizes,
-                color= colorwheel(cluster_index),
+                color= colorwheel(int(cluster_index)),
                 ),
             hovertemplate=(
                 f'x=%{{y:0.2f}}<br>y=%{{z:0.2f}}<br>z=%{{x:0.2f}}'
@@ -66,7 +66,7 @@ def get_plotly_pred(event, clustering):
 def get_plotly_truth(event):
     import plotly.graph_objects as go
     colorwheel = ColorWheel()
-    colorwheel.assign(-1, '#929591')
+    colorwheel.assign(0, '#bfbfbf')
 
     data = []
     energies = event.x[:,0].numpy()
@@ -82,7 +82,7 @@ def get_plotly_truth(event):
             marker=dict(
                 line=dict(width=0),
                 size=sizes,
-                color= colorwheel(cluster_index),
+                color= colorwheel(int(cluster_index)),
                 ),
             hovertemplate=(
                 f'x=%{{y:0.2f}}<br>y=%{{z:0.2f}}<br>z=%{{x:0.2f}}'
