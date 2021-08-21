@@ -1,9 +1,9 @@
 import numpy as np
 import torch
-from torch import Tensor
 import torch.nn as nn
 from torch_scatter import scatter_max, scatter_add
 from torch_geometric.data import DataLoader
+import torch_scatter
 
 
 def make_fake_model(output_dim: int):
@@ -25,14 +25,42 @@ DEBUG = False
 def debug(*args, **kwargs):
     if DEBUG: print(*args, **kwargs)
 
+
+
 def calc_LV_Lbeta(
     beta: torch.Tensor, cluster_coords: torch.Tensor, # Predicted by model
     cluster_index_per_event: torch.Tensor, # Truth hit->cluster index
     batch: torch.Tensor,
     qmin: float = .1,
     s_B: float = .1,
-    bkg_cluster_index: int = 0 # cluster_index entries with this value are bkg/noise
+    bkg_cluster_index: int = 0, # cluster_index entries with this value are bkg/noise
+    beta_stabilizing = 'soft_q_scaling',
+    huberize_norm_for_V_belonging = True,
+    gaussian_norm_for_V_notbelonging = True,
+    potentiallike_beta_loss = True
     ):
+    """
+    Calculates the potential loss and beta loss for object condensation.
+
+    Limited documentation:
+    beta (n_hits)
+    cluster_coords (n_hits x clusters_space_dim)
+    cluster_index_per_event (nhits): a per-event cluster index for each hit
+    batch (n_hits)
+
+    bkg_cluster_index: all hits where `cluster_index_per_event == bkg_cluster_index` will be treated as bkg
+
+    beta_stabilizing: Choices are ['paper', 'clip', 'soft_q_scaling']:
+        paper: beta is sigmoid(model_output), q = beta.arctanh()**2 + qmin
+        clip:  beta is clipped to 1-1e-4, q = beta.arctanh()**2 + qmin
+        soft_q_scaling: beta is sigmoid(model_output), q = (clip(beta)/1.002).arctanh()**2 + qmin
+
+    huberize_norm_for_V_belonging: Huberizes the norms when used in the attractive potential
+    gaussian_norm_for_V_notbelonging: Gaussian transform of norms when used in the repulsive potential
+    potentiallike_beta_loss: Uses the new potential-like beta loss instead of the paper version for
+                             the non-noise contribution of the beta loss
+    """
+
     # First do some device assertions
     device = beta.device
     assert all(t.device == device for t in [beta, cluster_coords, cluster_index_per_event, batch])
@@ -41,16 +69,13 @@ def calc_LV_Lbeta(
     assert_no_nans(batch)
     assert_no_nans(cluster_index_per_event)
 
-    # Some fixed event quantities
+    # Some fixed quantities
     n_hits = beta.size(0)
     cluster_space_dim = cluster_coords.size(1)
+    batch_size = torch.max(batch)+1
 
     # Transform indices-per-event to indices-per-batch
     # E.g. [ 0, 0, 1, 2, 0, 0, 1] -> [ 0, 0, 1, 2, 3, 3, 4 ]
-    # or for non-ordered:
-    # truth clus index: [1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 2]
-    # batch:            [2, 1, 1, 2, 1, 1, 2, 0, 0, 0, 1, 0, 0]
-    # output:           [6, 3, 4, 5, 3, 4, 5, 1, 0, 1, 4, 0, 2]
     cluster_index, n_clusters_per_event = batch_cluster_indices(cluster_index_per_event, batch)
     assert cluster_index.device == device
     assert n_clusters_per_event.device == device
@@ -66,7 +91,16 @@ def calc_LV_Lbeta(
 
     debug(f'\n\nIn calc_LV_Lbeta; n_hits={n_hits}, n_clusters={n_clusters}')
 
-    q = beta.arctanh()**2 + qmin
+    if beta_stabilizing == 'paper':
+        q = beta.arctanh()**2 + qmin
+    elif beta_stabilizing == 'clip':
+        beta = beta.clip(0., 1-1e-4)
+        q = beta.arctanh()**2 + qmin
+    elif beta_stabilizing == 'soft_q_scaling':
+        q = (beta.clip(0., 1-1e-4)/1.002).arctanh()**2 + qmin
+    else:
+        raise ValueError(f'beta_stablizing mode {beta_stabilizing} is not known')
+
     assert_no_nans(q)
     assert q.device == device
 
@@ -76,6 +110,12 @@ def calc_LV_Lbeta(
     assert_no_nans(q_alpha)
     assert q_alpha.device == device
     assert index_alpha.device == device
+
+    # Boolean mask for whether a hit is bkg (noise)
+    is_bkg = cluster_index_per_event == bkg_cluster_index
+    is_sig = cluster_index_per_event != bkg_cluster_index
+    assert is_bkg.device == device
+    assert is_sig.device == device
 
     debug('beta:', beta)
     debug('q:', q)
@@ -132,16 +172,33 @@ def calc_LV_Lbeta(
     assert q_alpha_expanded.device == device
 
     # Potential for hits w.r.t. the cluster they belong to
-    V_belonging = M * q_alpha_expanded * norms**2
+    # Noise hits are not part of the attractive potential,
+    # they are only pushed away
+    if huberize_norm_for_V_belonging:
+        # Huberized version (linear but times 4)
+        norms_V_belonging = huber(norms+1e-5, 4.)
+    else:
+        # Paper version is simply norms squared
+        norms_V_belonging = norms**2
+
+    V_belonging = is_sig.unsqueeze(-1) * M * q_alpha_expanded * norms_V_belonging
     assert V_belonging.device == device
 
     # Potential for hits w.r.t. the cluster they DO NOT belong to
-    V_notbelonging = 1. - (1-M) * q_alpha_expanded * norms
+    if gaussian_norm_for_V_notbelonging:
+        # Gaussian scaling term instead of a cone
+        norms_V_notbelonging = torch.exp(-4.*norms**2)
+    else:
+        # Paper version is simply linear norms
+        norms_V_notbelonging = norms
+    
+    # Also here do not count notbelonging w.r.t. noise clusters
+    V_notbelonging = is_sig.unsqueeze(-1) * (1. - (1-M) * q_alpha_expanded * norms_V_notbelonging)
     V_notbelonging[V_notbelonging < 0.] = 0. # Min of 0
     assert V_notbelonging.device == device
 
     # Count n_hits per entry in the batch (batch_size)
-    _, n_hits_per_event = torch.unique(batch, return_counts=True)
+    n_hits_per_event = scatter_count(batch)
     assert n_hits_per_event.device == device
     # Expand: (batch_size) --> (nhits)
     # e.g. [2, 3, 1] --> [2, 2, 3, 3, 3, 1]
@@ -167,27 +224,65 @@ def calc_LV_Lbeta(
     # calculate it here. Moving it to a dedicated function at some
     # point would be better design.
 
-    is_bkg = cluster_index_per_event == bkg_cluster_index
-    assert is_bkg.device == device
-    N_B = scatter_add(is_bkg, batch) # (batch_size)
+    N_B = scatter_add(is_bkg, batch) # (batch_size), number of bkg hits per batch
     assert N_B.device == device
-    # Expand (batch_size) -> (n_hits)
-    # e.g. [ 3, 2 ], [0, 0, 0, 0, 0, 1, 1, 1, 1] -> [3, 3, 3, 3, 3, 2, 2, 2, 2]
-    N_B_expanded = torch.gather(N_B, 0, batch).long()
-    assert N_B_expanded.device == device
-    bkg_term = s_B * (N_B_expanded*beta)[is_bkg].sum()
+    # Calculate sum(beta[is_bkg]) per event in the batch, then divide by N_B
+    bkg_term = s_B * (torch.nan_to_num(scatter_add(beta[is_bkg], batch[is_bkg]) / N_B)).sum()
     assert bkg_term.device == device
 
-    # n_clusters_per_event: (batch_size)
-    # (batch_size) --> (n_clusters)
-    # e.g. [3, 2] --> [3, 3, 3, 2, 2]
-    n_clusters_expanded = torch.repeat_interleave(n_clusters_per_event, n_clusters_per_event)
-    assert n_clusters_expanded.size() == (n_clusters,)
-    nonbkg_term = ((1.-beta_alpha)/n_clusters_expanded).sum()
+    # 8/20: This is wrong. To be deleted.
+    # # Expand (batch_size) -> (n_hits), number of bkg hits per batch copied per hit
+    # # e.g. [ 3, 2 ], [0, 0, 0, 0, 0, 1, 1, 1, 1] -> [3, 3, 3, 3, 3, 2, 2, 2, 2]
+    # N_B_expanded = torch.gather(N_B, 0, batch).long()
+    # assert N_B_expanded.device == device
+    # bkg_term = s_B * (N_B_expanded*beta)[is_bkg].sum()
+    # assert bkg_term.device == device
+
+    if not potentiallike_beta_loss:
+        # Paper version
+
+        # n_clusters_per_event: (batch_size)
+        # (batch_size) --> (n_clusters)
+        # e.g. [3, 2] --> [3, 3, 3, 2, 2]
+        n_clusters_expanded = torch.repeat_interleave(n_clusters_per_event, n_clusters_per_event)
+        assert n_clusters_expanded.size() == (n_clusters,)
+
+        sig_term = torch.nan_to_num((1.-beta_alpha)/n_clusters_expanded).sum()
+        # Alternative would be to first sum beta_alpha from (n_clusters) -> (batch_size)
+        # and then divide by n_clusters_per_event
+
+    else:
+        # New potential-like beta loss for signal term
+
+        # object: A cluster that is NOT a bkg cluster
+        is_object = scatter_max(is_sig.long(), cluster_index)[0].bool()
+        assert is_object.size(0) == n_clusters
+        n_objects = is_object.sum()
+
+        # Get the norms w.r.t. objects only (throw away norms w.r.t. noise clusters)
+        norms_wrt_object = norms[:,is_object]
+        # Apply transformation and sum over hits
+        norms_term = (1./(20.*norms_wrt_object+1.)).sum(dim=0)
+        assert norms_term.size() == (n_objects,)
+
+        n_hits_per_object = scatter_count(cluster_index)[is_object]
+        sig_term = ((norms_term * beta_alpha[is_object]) / n_hits_per_object)
+        assert sig_term.size() == (n_objects,)
+
+        # Objects per event: Use convention that bkg is always index 0;
+        # Simply number of clusters (in which bkg is counted as a cluster) minus 1
+        n_objects_per_event = n_clusters_per_event - 1
+
+        # Divide by number of objects per event K; repeat_interleave to match dimensions
+        sig_term /= torch.repeat_interleave(n_objects_per_event, n_objects_per_event)
+        assert sig_term.size() == (n_objects,)
+
+        # Sum up the sig_terms per object
+        sig_term = sig_term.sum()
 
     # Final Lbeta
-    Lbeta = nonbkg_term + bkg_term
-    debug(f'LV={LV:.6f}, Lbeta={Lbeta:.6f} (nonbkg={nonbkg_term:.4f}, bkg={bkg_term:.4f})')
+    Lbeta = sig_term + bkg_term
+    debug(f'LV={LV:.6f}, Lbeta={Lbeta:.6f} (sig={sig_term:.4f}, bkg={bkg_term:.4f})')
     return LV, Lbeta
 
 
@@ -196,20 +291,21 @@ def softclip(array, start_clip_value):
     array = torch.where(array>1, torch.log(array+1.), array)
     return array * start_clip_value
 
-def huber_jan(array, delta):
-    """
-    See: https://en.wikipedia.org/wiki/Huber_loss#Definition
-    """
-    loss_squared = array**2
-    array_abs = torch.abs(array)
-    loss_linear = delta**2 + 2.*delta * (array_abs - delta)
-    return tf.where(array_abs < delta, loss_squared, loss_linear)
+# def huber_jan(array, delta):
+#     """
+#     See: https://en.wikipedia.org/wiki/Huber_loss#Definition
+#     """
+#     loss_squared = array**2
+#     array_abs = torch.abs(array)
+#     loss_linear = delta**2 + 2.*delta * (array_abs - delta)
+#     return torch.where(array_abs < delta, loss_squared, loss_linear)
 
 def huber(d, delta):
     """
     See: https://en.wikipedia.org/wiki/Huber_loss#Definition
+    Multiplied by 2 w.r.t Wikipedia version (aligning with Jan's definition)
     """
-    return torch.where(d<=delta, .5*d**2, delta*(d-.5*delta))
+    return torch.where(torch.abs(d)<=delta, d**2, 2.*delta*(torch.abs(d)-delta))
 
 def calc_L_energy(pred_energy, truth_energy):
     diff = torch.abs(pred_energy - truth_energy)
@@ -274,8 +370,7 @@ def batch_cluster_indices(cluster_id: torch.Tensor, batch: torch.Tensor):
     # Offsets are then a cumulative sum
     offset_values_nozero = n_clusters_per_event[:-1].cumsum(dim=-1)
     # Prefix a zero
-    offset_values = torch.zeros(offset_values_nozero.size(0)+1, device=device)
-    offset_values[1:] = offset_values_nozero
+    offset_values = torch.cat((torch.zeros(1), offset_values_nozero))
     # Fill it per hit
     offset = torch.gather(offset_values, 0, batch).long()
     return offset + cluster_id, n_clusters_per_event
@@ -436,10 +531,33 @@ def test_get_clustering():
     np.testing.assert_array_equal(y, clustering_torch)
 
 
+def scatter_count(input: torch.Tensor):
+    """
+    Returns ordered counts over an index array
+
+    Example:
+    input:  [0, 0, 0, 1, 1, 2, 2]
+    output: [3, 2, 2]
+
+    Index assumptions like in torch_scatter, so:
+    scatter_count(torch.Tensor([1, 1, 1, 2, 2, 4, 4]))
+    >>> tensor([0, 3, 2, 0, 2])
+    """
+    return scatter_add(torch.ones_like(input, dtype=torch.long), input.long())
+
+def test_scatter_count():
+    t = torch.Tensor([0, 0, 0, 1, 1, 2, 2])
+    print(scatter_count(t))
+    assert torch.allclose(torch.LongTensor([3, 2 ,2]), scatter_count(t))
+
+
+
 def main():
-    # pass
+    pass
     # test_get_clustering()
-    test_batch_cluster_indices()
+    # test_batch_cluster_indices()
+    # test_is_sig_cluster()
+    # test_scatter_count()
 
 if __name__ == '__main__':
     main()

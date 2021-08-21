@@ -114,7 +114,7 @@ class TauDataset(Dataset):
     def get(self, i):
         d = np.load(self.npzs[i])
         x = d['recHitFeatures']
-        cluster_index = incremental_cluster_index(d['recHitTruthClusterIdx'].squeeze())
+        cluster_index = incremental_cluster_index_np(d['recHitTruthClusterIdx'].squeeze())
         truth_cluster_props = np.hstack((
             d['recHitTruthEnergy'],
             d['recHitTruthPosition'],
@@ -147,9 +147,11 @@ class TauDataset(Dataset):
         return left, right
 
 
-def incremental_cluster_index(cluster_index_nonzeroindices, noise_index=-1):
-    # Build a map that translates the random indices to ordered starting from zero
-    # E.g. [ -1 -1 13 -1 13 13 42 -1 -1] -> [ 0 0 1 0 1 1 2 0 0 ]
+def incremental_cluster_index_np(cluster_index_nonzeroindices, noise_index=-1):
+    """
+    Build a map that translates the random indices to ordered starting from zero
+    E.g. [ -1 -1 13 -1 13 13 42 -1 -1] -> [ 0 0 1 0 1 1 2 0 0 ]
+    """
     # cluster_index_map = { -1 : 0 } # Always translate -1 (noise) to index 0
     cluster_index_map = {}
     for cluster_index in np.unique(cluster_index_nonzeroindices):
@@ -164,6 +166,59 @@ def incremental_cluster_index(cluster_index_nonzeroindices, noise_index=-1):
     return cluster_index
 
 
+def unique_via_cpu(input):
+    """
+    torch.unique is supposedly very slow on the gpu.
+    This copies the tensor to cpu, performs unique, and returns output
+    """
+    return torch.unique(x.cpu(), sorted=False).to(x.device)
+
+
+def incremental_cluster_index(input: torch.Tensor, noise_index=None):
+    """
+    Build a map that translates arbitrary indices to ordered starting from zero
+
+    By default the first unique index will be 0 in the output, the next 1, etc.
+    E.g. [13 -1 -1 13 -1 13 13 42 -1 -1] -> [0 1 1 0 1 0 0 2 1 1]
+
+    If noise_index is not None, the output will be 0 where input==noise_index:
+    E.g. noise_index=-1, [13 -1 -1 13 -1 13 13 42 -1 -1] -> [1 0 0 1 0 1 1 2 0 0]
+
+    If noise_index is not None but the input does not contain noise_index, 0
+    will still be reserved for it:
+    E.g. noise_index=-1, [13 4 4 13 4 13 13 42 4 4] -> [1 2 2 1 2 1 1 3 2 2]
+    """
+    unique_indices, locations = torch.unique(input, return_inverse=True, sorted=True)
+
+    cluster_index_map = torch.arange(unique_indices.size(0))
+    if noise_index is not None:
+        if noise_index in unique_indices:
+            # Sort so that 0 aligns with the noise_index
+            cluster_index_map = cluster_index_map[(unique_indices != noise_index).argsort()]
+        else:
+            # Still reserve 0 for noise, even if it's not present
+            cluster_index_map += 1
+    return torch.gather(cluster_index_map, 0, locations).long()
+
+
+def test_incremental_cluster_index():
+    input = torch.LongTensor([13, 4, 4, 13, 4, 13, 13, 42, 4, 4])
+    assert torch.allclose(
+        incremental_cluster_index(input),
+        torch.LongTensor([1, 0, 0, 1, 0, 1, 1, 2, 0, 0])
+        )
+    # Noise index should get 0 if it is supplied:
+    assert torch.allclose(
+        incremental_cluster_index(input, noise_index=13),
+        torch.LongTensor([0, 1, 1, 0, 1, 0, 0, 2, 1, 1])
+        )
+    # 0 should still be reserved for noise_index even if it is not present:
+    assert torch.allclose(
+        incremental_cluster_index(input, noise_index=-99),
+        torch.LongTensor([2, 1, 1, 2, 1, 2, 2, 3, 1, 1])
+        )
+
+
 def test_ordered_cluster_index():
     a = [ -1, -1, 13, -1, 13, 13, 42, -1, -1]
     b = [ 0, 0, 1, 0, 1, 1, 2, 0, 0 ]
@@ -172,11 +227,9 @@ def test_ordered_cluster_index():
 
 def test_full_chain():
     dataset = TauDataset('data/taus')
-    print(dataset.get(0))
     dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
 
     from gravnet_model import GravnetModel
-
     model = GravnetModel(input_dim=9, output_dim=8)
 
     for data in dataloader:
@@ -247,8 +300,9 @@ def test_blobs():
 
 
 def main():
-    # test_full_chain()
-    test_blobs()
+    test_full_chain()
+    # test_blobs()
+    # test_incremental_cluster_index()
 
 if __name__ == '__main__':
     main()
