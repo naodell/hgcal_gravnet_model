@@ -224,8 +224,11 @@ def calc_LV_Lbeta(
     # calculate it here. Moving it to a dedicated function at some
     # point would be better design.
 
-    N_B = scatter_add(is_bkg, batch) # (batch_size), number of bkg hits per batch
+    N_B = scatter_add(is_bkg.long(), batch) # (batch_size), number of bkg hits per batch
+    debug('N_B:', N_B)
     assert N_B.device == device
+    assert torch.all(N_B > 0)
+
     # Calculate sum(beta[is_bkg]) per event in the batch, then divide by N_B
     bkg_term = s_B * (torch.nan_to_num(scatter_add(beta[is_bkg], batch[is_bkg]) / N_B)).sum()
     assert bkg_term.device == device
@@ -378,7 +381,7 @@ def batch_cluster_indices(cluster_id: torch.Tensor, batch: torch.Tensor):
     # Offsets are then a cumulative sum
     offset_values_nozero = n_clusters_per_event[:-1].cumsum(dim=-1)
     # Prefix a zero
-    offset_values = torch.cat((torch.zeros(1), offset_values_nozero))
+    offset_values = torch.cat((torch.zeros(1, device=device), offset_values_nozero))
     # Fill it per hit
     offset = torch.gather(offset_values, 0, batch).long()
     return offset + cluster_id, n_clusters_per_event

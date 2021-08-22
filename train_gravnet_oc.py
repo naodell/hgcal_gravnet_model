@@ -10,7 +10,7 @@ from lrscheduler import CyclicLRWithRestarts
 
 torch.manual_seed(1009)
 
-objectcondensation.DEBUG = True
+# objectcondensation.DEBUG = True
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -28,7 +28,7 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle)
 
-    model = GravnetModel(input_dim=9, output_dim=5).to(device)
+    model = GravnetModel(input_dim=9, output_dim=4).to(device)
 
     epoch_size = len(train_loader.dataset)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
@@ -37,7 +37,7 @@ def main():
     def loss_fn(out, data, s_c=1.):
         device = out.device
         pred_betas = torch.sigmoid(out[:,0])
-        pred_cluster_space_coords = out[:,1:5]
+        pred_cluster_space_coords = out[:,1:4]
         # pred_cluster_properties = out[:,3:]
         assert all(t.device == device for t in [
             pred_betas, pred_cluster_space_coords, data.y,
