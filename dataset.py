@@ -242,7 +242,7 @@ def test_full_chain():
 
     betas = out[:,0]
     cluster_space_coordinates = out[:,1:3]
-    pred_cluster_properties = out[:,3:]
+    pred_cluster_props = out[:,3:]
 
     from objectcondensation import calc_LV_Lbeta, calc_L_energy, calc_Lp
     LV, Lbeta = calc_LV_Lbeta(
@@ -254,15 +254,15 @@ def test_full_chain():
     print(LV, Lbeta)
 
     L_energy = calc_L_energy(
-        pred_cluster_properties[:,0],
-        data.cluster_properties[:,0]
+        pred_cluster_props[:,0],
+        data.truth_cluster_props[:,0]
         )
     print(L_energy)
 
     Lp = calc_Lp(
         betas, data.y.type(torch.LongTensor),
-        pred_cluster_properties,
-        data.cluster_properties
+        pred_cluster_props,
+        data.truth_cluster_props
         )
     print(Lp)
 
@@ -279,7 +279,7 @@ def test_blobs():
 
     betas = torch.sigmoid(out[:,0])
     cluster_space_coordinates = out[:,1:3]
-    pred_cluster_properties = out[:,3:]
+    pred_cluster_props = out[:,3:]
 
     print(betas)
 
