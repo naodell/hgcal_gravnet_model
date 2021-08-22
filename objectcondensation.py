@@ -229,6 +229,7 @@ def calc_LV_Lbeta(
     # Calculate sum(beta[is_bkg]) per event in the batch, then divide by N_B
     bkg_term = s_B * (torch.nan_to_num(scatter_add(beta[is_bkg], batch[is_bkg]) / N_B)).sum()
     assert bkg_term.device == device
+    assert_no_nans(bkg_term)
 
     # 8/20: This is wrong. To be deleted.
     # # Expand (batch_size) -> (n_hits), number of bkg hits per batch copied per hit
@@ -264,21 +265,28 @@ def calc_LV_Lbeta(
         # Apply transformation and sum over hits
         norms_term = (1./(20.*norms_wrt_object+1.)).sum(dim=0)
         assert norms_term.size() == (n_objects,)
+        assert_no_nans(norms_term)
 
         n_hits_per_object = scatter_count(cluster_index)[is_object]
+        assert torch.all(n_hits_per_object > 0)
         sig_term = ((norms_term * beta_alpha[is_object]) / n_hits_per_object)
         assert sig_term.size() == (n_objects,)
+        assert_no_nans(sig_term)
 
         # Objects per event: Use convention that bkg is always index 0;
         # Simply number of clusters (in which bkg is counted as a cluster) minus 1
         n_objects_per_event = n_clusters_per_event - 1
+        # assert torch.all(n_objects_per_event > 0) # Not per se necessary
 
         # Divide by number of objects per event K; repeat_interleave to match dimensions
         sig_term /= torch.repeat_interleave(n_objects_per_event, n_objects_per_event)
         assert sig_term.size() == (n_objects,)
+        assert_no_nans(sig_term)
 
         # Sum up the sig_terms per object
         sig_term = sig_term.sum()
+
+    assert_no_nans(sig_term)
 
     # Final Lbeta
     Lbeta = sig_term + bkg_term

@@ -10,6 +10,7 @@ from lrscheduler import CyclicLRWithRestarts
 
 torch.manual_seed(1009)
 
+objectcondensation.DEBUG = True
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
