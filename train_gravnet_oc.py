@@ -7,23 +7,30 @@ import objectcondensation
 from gravnet_model import GravnetModel, debug
 from dataset import TauDataset
 from lrscheduler import CyclicLRWithRestarts
+import argparse
 
 torch.manual_seed(1009)
 
 # objectcondensation.DEBUG = True
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-d', '--dry', action='store_true', help='Turn off checkpoint saving')
+    args = parser.parse_args()
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device', device)
 
-    do_checkpoints = True
-    # do_checkpoints = False
     n_epochs = 400
     batch_size = 4
 
     shuffle = True
     # dataset, _ = TauDataset('data/taus').split(.01) # Only use 10% for debugging
     dataset = TauDataset('data/taus')
+    if args.dry:
+        keep = .01
+        print(f'Keeping only {100.*keep:.0f}% of events for debugging')
+        dataset, _ = dataset.split(keep)
     train_dataset, test_dataset = dataset.split(.8)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle)
@@ -34,7 +41,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
     # scheduler = CyclicLRWithRestarts(optimizer, batch_size, epoch_size, restart_period=400, t_mult=1.1, policy="cosine")
 
-    def loss_fn(out, data, s_c=1.):
+    def loss_fn(out, data, s_c=1., return_components=False):
         device = out.device
         pred_betas = torch.sigmoid(out[:,0])
         pred_cluster_space_coords = out[:,1:4]
@@ -44,13 +51,18 @@ def main():
             data.batch,
             # pred_cluster_properties, data.truth_cluster_props
             ])
-        LV, Lbeta = objectcondensation.calc_LV_Lbeta(
+        out = objectcondensation.calc_LV_Lbeta(
             pred_betas,
             pred_cluster_space_coords,
             data.y.long(),
-            data.batch
+            data.batch,
+            return_components=return_components
             )
-        return LV + Lbeta
+        if return_components:
+            return out[2]
+        else:
+            LV, Lbeta = out[:2]
+            return LV + Lbeta
         # Lp = objectcondensation.calc_Lp(
         #     pred_betas,
         #     data.y.long(),
@@ -81,23 +93,44 @@ def main():
             raise
 
     def test(epoch):
+        N_test = len(test_loader)
+        loss_components = dict(
+            V = 0., beta = 0.,
+            beta_sig = 0., beta_bkg = 0.,
+            V_belonging = 0.,
+            V_notbelonging = 0.
+            )
+        def update(components):
+            for key, value in components.items():
+                loss_components[key] += value
         with torch.no_grad():
             model.eval()
-            loss = 0.
             for data in tqdm.tqdm(test_loader, total=len(test_loader)):
                 data = data.to(device)
                 result = model(data.x, data.batch)
-                loss += loss_fn(result, data)
-            loss /= len(test_loader)
-            print(f'Avg test loss: {loss}')
-        return loss
+                update(loss_fn(result, data, return_components=True))
+        # Divide by number of entries
+        for key in loss_components:
+            loss_components[key] /= N_test
+        # Compute total loss and do printout
+        total_loss = loss_components['V']+loss_components['beta']
+        loss_fractions = { k : v/total_loss for k, v in loss_components.items() }
+        fkey = lambda key: f'{loss_components[key]:10.4f} ({100.*loss_fractions[key]:.1f}%)'
+        print(f'test loss: {total_loss :.4f}')
+        print(f'  V    = {fkey("V")}')
+        print(f'    like-term     = {fkey("V_belonging")}')
+        print(f'    not-like-term = {fkey("V_notbelonging")}')
+        print(f'  beta = {fkey("beta")}')
+        print(f'    sig           = {fkey("beta_sig")}')
+        print(f'    bkg           = {fkey("beta_bkg")}')
+        return total_loss
 
     ckpt_dir = strftime('ckpts_gravnet_%b%d')
     def write_checkpoint(checkpoint_number=None, best=False):
         ckpt = 'ckpt_best.pth.tar' if best else 'ckpt_{0}.pth.tar'.format(checkpoint_number)
         ckpt = osp.join(ckpt_dir, ckpt)
         if best: print('Saving epoch {0} as new best'.format(checkpoint_number))
-        if do_checkpoints:
+        if not args.dry:
             os.makedirs(ckpt_dir, exist_ok=True)
             torch.save(dict(model=model.state_dict()), ckpt)
 

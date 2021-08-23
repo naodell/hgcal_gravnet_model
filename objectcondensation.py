@@ -37,7 +37,8 @@ def calc_LV_Lbeta(
     beta_stabilizing = 'soft_q_scaling',
     huberize_norm_for_V_belonging = True,
     gaussian_norm_for_V_notbelonging = True,
-    potentiallike_beta_loss = True
+    potentiallike_beta_loss = True,
+    return_components = False
     ):
     """
     Calculates the potential loss and beta loss for object condensation.
@@ -59,8 +60,9 @@ def calc_LV_Lbeta(
     gaussian_norm_for_V_notbelonging: Gaussian transform of norms when used in the repulsive potential
     potentiallike_beta_loss: Uses the new potential-like beta loss instead of the paper version for
                              the non-noise contribution of the beta loss
-    """
 
+    return_components: Returns, besides L_V and L_beta, a dict of some loss components
+    """
     # First do some device assertions
     device = beta.device
     assert all(t.device == device for t in [beta, cluster_coords, cluster_index_per_event, batch])
@@ -276,6 +278,9 @@ def calc_LV_Lbeta(
         assert sig_term.size() == (n_objects,)
         assert_no_nans(sig_term)
 
+        # Note Jan: "now 'standard' 1-beta"
+        sig_term -= .2*torch.log(beta_alpha[is_object]+1e-9)
+
         # Objects per event: Use convention that bkg is always index 0;
         # Simply number of clusters (in which bkg is counted as a cluster) minus 1
         n_objects_per_event = n_clusters_per_event - 1
@@ -293,8 +298,26 @@ def calc_LV_Lbeta(
 
     # Final Lbeta
     Lbeta = sig_term + bkg_term
-    debug(f'LV={LV:.6f}, Lbeta={Lbeta:.6f} (sig={sig_term:.4f}, bkg={bkg_term:.4f})')
-    return LV, Lbeta
+
+    if DEBUG or return_components:
+        # Calculate the individual components of the V loss
+        V_belonging_summed = torch.sum(q.unsqueeze(-1) * V_belonging / n_hits_expanded.unsqueeze(-1))
+        V_not_belonging_summed = torch.sum(q.unsqueeze(-1) * V_notbelonging / n_hits_expanded.unsqueeze(-1))
+    if DEBUG:
+        debug(
+            f'LV={LV:.6f} (like-term={V_belonging_summed:.4f}, not-like-term={V_not_belonging_summed}),'
+            f'Lbeta={Lbeta:.ff} (sig={sig_term:.4f}, bkg={bkg_term:.4f})'
+            )
+    if return_components:
+        components = dict(
+            V = float(LV), beta = float(Lbeta),
+            beta_sig = float(sig_term), beta_bkg = float(bkg_term),
+            V_belonging = float(V_belonging_summed),
+            V_notbelonging = float(V_not_belonging_summed)
+            )
+        return LV, Lbeta, components
+    else:
+        return LV, Lbeta
 
 
 def softclip(array, start_clip_value):
