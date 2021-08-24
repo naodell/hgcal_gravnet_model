@@ -182,13 +182,15 @@ def calc_LV_Lbeta(
     # they are only pushed away
     if huberize_norm_for_V_belonging:
         # Huberized version (linear but times 4)
-        # Re-zero out the norms of hits to clusters from other events
-        norms_V_belonging = huber((norms+1e-5)*inter_event_norms_mask, 4.)
+        # Be sure to not move 'off-diagonal' away from zero
+        # (i.e. norms of hits w.r.t. clusters they do _not_ belong to)
+        norms_V_belonging = M * huber(norms+1e-5, 4.)
     else:
-        # Paper version is simply norms squared
-        norms_V_belonging = norms**2
+        # Paper version is simply norms squared (no need for mask)
+        norms_V_belonging = M * norms**2
+    assert norms_V_belonging.size() == (n_hits, n_clusters)
 
-    V_belonging = is_sig.unsqueeze(-1) * M * q_alpha_expanded * norms_V_belonging
+    V_belonging = is_sig.unsqueeze(-1) * q_alpha_expanded * norms_V_belonging
     assert V_belonging.device == device
 
     # Potential for hits w.r.t. the cluster they DO NOT belong to
@@ -282,7 +284,7 @@ def calc_LV_Lbeta(
 
         # Get the norms w.r.t. objects only (throw away norms w.r.t. noise clusters)
         # (n_hits x n_clusters) -> (n_hits x n_objects)
-        norms_wrt_object = norms[:,is_object]
+        norms_wrt_object = (M*norms)[:,is_object]
         assert norms_wrt_object.size() == (n_hits, n_objects)
 
         m = 20.
@@ -309,28 +311,30 @@ def calc_LV_Lbeta(
         debug('n_sig_hits_per_event:', scatter_count(batch[is_sig]))
 
 
-        n_sig_hits_per_event_expanded = torch.repeat_interleave(scatter_count(batch[is_sig]), n_objects_per_event)
-        debug('n_sig_hits_per_event_expanded:', n_sig_hits_per_event_expanded)
+        # n_sig_hits_per_event_expanded = torch.repeat_interleave(scatter_count(batch[is_sig]), n_objects_per_event)
+        # debug('n_sig_hits_per_event_expanded:', n_sig_hits_per_event_expanded)
 
 
-        mask = is_sig.unsqueeze(-1) & inter_event_norms_mask[:,is_object].bool()
-        debug('mask:', mask)
-        assert mask.size() == (n_hits, n_objects)
+        # mask = is_sig.unsqueeze(-1) & inter_event_norms_mask[:,is_object].bool()
+        # debug('mask:', mask)
+        # assert mask.size() == (n_hits, n_objects)
 
-        norms_term = torch.where(
-            mask,
-            1.-1./(m*norms_wrt_object**2+1.),
-            torch.zeros_like(norms_wrt_object)
-            )
-        # # Apply transformation and re-zero out the norms of hits to objects from other events
-        # norms_term = (
-        #     is_sig.unsqueeze(-1).long() * inter_event_norms_mask[:,is_object]
-        #     * 1./(m*norms_wrt_object**2+1.)
+        norms_term = (1./(20.*norms_wrt_object**2+1.) * M[:,is_object]).sum(dim=0)
+
+        # norms_term = torch.where(
+        #     mask,
+        #     1./(m*norms_wrt_object**2+1.),
+        #     torch.zeros_like(norms_wrt_object)
         #     )
+        # # # Apply transformation and re-zero out the norms of hits to objects from other events
+        # # norms_term = (
+        # #     is_sig.unsqueeze(-1).long() * inter_event_norms_mask[:,is_object]
+        # #     * 1./(m*norms_wrt_object**2+1.)
+        # #     )
         debug('norms_term:', norms_term)
-        debug('norms_term.sum(dim=0):', norms_term.sum(dim=0))
+        # debug('norms_term.sum(dim=0):', norms_term.sum(dim=0))
 
-        norms_term = norms_term.sum(dim=0)
+        # norms_term = norms_term.sum(dim=0)
         assert norms_term.size() == (n_objects,)
         assert_no_nans(norms_term)
 
@@ -340,15 +344,13 @@ def calc_LV_Lbeta(
         # assert norms_term.size() == (n_objects,)
         # assert_no_nans(norms_term)
         
-        # sig_term = ((norms_term * beta_alpha[is_object]) / n_hits_per_object)
-        sig_term = ((norms_term * beta_alpha[is_object]) / n_sig_hits_per_event_expanded)
+        sig_term = ((norms_term * beta_alpha[is_object]) / n_hits_per_object)
+        # sig_term = ((norms_term * beta_alpha[is_object]) / n_sig_hits_per_event_expanded)
         assert sig_term.size() == (n_objects,)
         assert_no_nans(sig_term)
 
         # Note Jan: "now 'standard' 1-beta"
-        # m2 = .2
-        m2 = .2
-        logbeta_term = -m2*torch.log(beta_alpha[is_object]+1e-9)
+        logbeta_term = -.2*torch.log(beta_alpha[is_object]+1e-9)
         sig_term_before_logbeta = sig_term.clone()
         sig_term += logbeta_term
 
@@ -404,7 +406,7 @@ def formatted_loss_components_string(components):
         f'\n    not-like-term = {fkey("V_notbelonging")}'
         f'\n  beta = {fkey("beta")}'
         f'\n    sig           = {fkey("beta_sig")}'
-        f' ({components["beta_sig_before_logbeta"]:.4f} + {components["beta_sig_logbeta"]:+.4f})'
+        f' (potentiallike={components["beta_sig_before_logbeta"]:.4f}, beta_contr={components["beta_sig_logbeta"]:.4f})'
         f'\n    bkg           = {fkey("beta_bkg")}'
         )
 
