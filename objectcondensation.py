@@ -158,6 +158,9 @@ def calc_LV_Lbeta(
     assert_no_nans(norms)
     assert norms.device == device
 
+    # Mask out norms of hits to clusters in other events
+    norms *= get_inter_event_norms_mask(batch, n_clusters_per_event)
+
     # Index to matrix, e.g.:
     # [1, 3, 1, 0] --> [
     #     [0, 1, 0, 0],
@@ -585,9 +588,69 @@ def test_scatter_count():
     assert torch.allclose(torch.LongTensor([3, 2 ,2]), scatter_count(t))
 
 
+def get_inter_event_norms_mask(batch: torch.LongTensor, nclusters_per_event: torch.LongTensor):
+    """
+    Creates mask of (nhits x nclusters) that is only 1 if hit i is in the same event as cluster j
+
+    Example:
+    cluster_id_per_event = torch.LongTensor([0, 0, 1, 1, 2, 0, 0, 1, 1, 1, 0, 0, 1])
+    batch = torch.LongTensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2])
+
+    Should return:
+    torch.LongTensor([
+        [1, 1, 1, 0, 0, 0, 0],
+        [1, 1, 1, 0, 0, 0, 0],
+        [1, 1, 1, 0, 0, 0, 0],
+        [1, 1, 1, 0, 0, 0, 0],
+        [1, 1, 1, 0, 0, 0, 0],
+        [0, 0, 0, 1, 1, 0, 0],
+        [0, 0, 0, 1, 1, 0, 0],
+        [0, 0, 0, 1, 1, 0, 0],
+        [0, 0, 0, 1, 1, 0, 0],
+        [0, 0, 0, 1, 1, 0, 0],
+        [0, 0, 0, 0, 0, 1, 1],
+        [0, 0, 0, 0, 0, 1, 1],
+        [0, 0, 0, 0, 0, 1, 1],
+        ])
+    """
+    # Following the example:
+    # Expand batch to the following (nhits x nevents) matrix (little hacky, boolean mask -> long):
+    # [[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    #  [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
+    #  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1]]
+    batch_expanded_as_ones = (batch == torch.arange(batch.max()+1, dtype=torch.long).unsqueeze(-1) ).long()
+    # Then repeat_interleave it to expand it to nclusters rows, and transpose to get (nhits x nclusters)
+    return batch_expanded_as_ones.repeat_interleave(nclusters_per_event, dim=0).T
+
+
+
+def test_make_norm_mask():
+    batch = torch.LongTensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2])
+    cluster_id_per_event = torch.LongTensor([0, 0, 1, 1, 2, 0, 0, 1, 1, 1, 0, 0, 1])
+    nclusters_per_event = scatter_max(cluster_id_per_event, batch)[0] + 1
+    assert torch.allclose(
+        get_inter_event_norms_mask(batch, nclusters_per_event),
+        torch.LongTensor([
+            [1, 1, 1, 0, 0, 0, 0],
+            [1, 1, 1, 0, 0, 0, 0],
+            [1, 1, 1, 0, 0, 0, 0],
+            [1, 1, 1, 0, 0, 0, 0],
+            [1, 1, 1, 0, 0, 0, 0],
+            [0, 0, 0, 1, 1, 0, 0],
+            [0, 0, 0, 1, 1, 0, 0],
+            [0, 0, 0, 1, 1, 0, 0],
+            [0, 0, 0, 1, 1, 0, 0],
+            [0, 0, 0, 1, 1, 0, 0],
+            [0, 0, 0, 0, 0, 1, 1],
+            [0, 0, 0, 0, 0, 1, 1],
+            [0, 0, 0, 0, 0, 1, 1],
+            ])
+        )
+
 
 def main():
     pass
+    # test_make_norm_mask()
     # test_get_clustering()
     # test_batch_cluster_indices()
     # test_is_sig_cluster()
