@@ -274,13 +274,19 @@ def calc_LV_Lbeta(
         n_hits_per_object = scatter_count(cluster_index)[is_object]
         assert torch.all(n_hits_per_object > 0)
 
+        # Objects per event: Use convention that bkg is always index 0;
+        # Simply number of clusters (in which bkg is counted as a cluster) minus 1
+        n_objects_per_event = n_clusters_per_event - 1
+        # assert torch.all(n_objects_per_event > 0) # Not per se necessary
+
+
         # Get the norms w.r.t. objects only (throw away norms w.r.t. noise clusters)
         # (n_hits x n_clusters) -> (n_hits x n_objects)
         norms_wrt_object = norms[:,is_object]
         assert norms_wrt_object.size() == (n_hits, n_objects)
 
-        # m = 20.
-        m = 2e5
+        m = 20.
+        # m = 2e5
         
         # raw_norms_term = 1./(m*norms_wrt_object**2+1.)
         # raw_norms_term *= inter_event_norms_mask[:,is_object]
@@ -298,34 +304,70 @@ def calc_LV_Lbeta(
         # En is er ook precies 1 per cluster
         # --> DIT IS WAT JAN BEDOELT MET SELF-INTERACTION!
 
-        # Apply transformation and sum over hits
-        # Re-zero out the norms of hits to objects from other events
-        norms_term = 1. - (
-            inter_event_norms_mask[:,is_object] * 1./(m*norms_wrt_object**2+1.)
-            ).sum(dim=0)
-        # Re the `1. - `, note Jan: "remove self-interaction term (just for offset)"
+        debug('n_hits_per_object:', n_hits_per_object)
+        debug('n_hits_per_event:', n_hits_per_event)
+        debug('n_sig_hits_per_event:', scatter_count(batch[is_sig]))
+
+
+        n_sig_hits_per_event_expanded = torch.repeat_interleave(scatter_count(batch[is_sig]), n_objects_per_event)
+        debug('n_sig_hits_per_event_expanded:', n_sig_hits_per_event_expanded)
+
+
+        mask = is_sig.unsqueeze(-1) & inter_event_norms_mask[:,is_object].bool()
+        debug('mask:', mask)
+        assert mask.size() == (n_hits, n_objects)
+
+        norms_term = torch.where(
+            mask,
+            1.-1./(m*norms_wrt_object**2+1.),
+            torch.zeros_like(norms_wrt_object)
+            )
+        # # Apply transformation and re-zero out the norms of hits to objects from other events
+        # norms_term = (
+        #     is_sig.unsqueeze(-1).long() * inter_event_norms_mask[:,is_object]
+        #     * 1./(m*norms_wrt_object**2+1.)
+        #     )
+        debug('norms_term:', norms_term)
+        debug('norms_term.sum(dim=0):', norms_term.sum(dim=0))
+
+        norms_term = norms_term.sum(dim=0)
         assert norms_term.size() == (n_objects,)
         assert_no_nans(norms_term)
+
+        # Re-zero out the norms of hits to objects from other events
+        # norms_term = 1. - transformed_norms.sum(dim=0)
+        # Re the `1. - `, note Jan: "remove self-interaction term (just for offset)"
+        # assert norms_term.size() == (n_objects,)
+        # assert_no_nans(norms_term)
         
-        sig_term = ((norms_term * beta_alpha[is_object]) / n_hits_per_object)
+        # sig_term = ((norms_term * beta_alpha[is_object]) / n_hits_per_object)
+        sig_term = ((norms_term * beta_alpha[is_object]) / n_sig_hits_per_event_expanded)
         assert sig_term.size() == (n_objects,)
         assert_no_nans(sig_term)
 
         # Note Jan: "now 'standard' 1-beta"
-        sig_term -= .2*torch.log(beta_alpha[is_object]+1e-9)
+        # m2 = .2
+        m2 = .2
+        logbeta_term = -m2*torch.log(beta_alpha[is_object]+1e-9)
+        sig_term_before_logbeta = sig_term.clone()
+        sig_term += logbeta_term
 
-        # Objects per event: Use convention that bkg is always index 0;
-        # Simply number of clusters (in which bkg is counted as a cluster) minus 1
-        n_objects_per_event = n_clusters_per_event - 1
-        # assert torch.all(n_objects_per_event > 0) # Not per se necessary
+        # Number of objects per event K, expand from (n_events,) to (n_objects,)
+        K = torch.repeat_interleave(n_objects_per_event, n_objects_per_event)
+        assert K.size() == (n_objects,)
 
         # Divide by number of objects per event K; repeat_interleave to match dimensions
-        sig_term /= torch.repeat_interleave(n_objects_per_event, n_objects_per_event)
+        sig_term /= K
         assert sig_term.size() == (n_objects,)
         assert_no_nans(sig_term)
 
         # Sum up the sig_terms per object
         sig_term = sig_term.sum()
+
+        # Other terms
+        if DEBUG or return_components:
+            logbeta_term = (logbeta_term/K).sum()
+            sig_term_before_logbeta = (sig_term_before_logbeta/K).sum()
 
     assert_no_nans(sig_term)
 
@@ -339,24 +381,32 @@ def calc_LV_Lbeta(
         components = dict(
             V = float(LV), beta = float(Lbeta),
             beta_sig = float(sig_term), beta_bkg = float(bkg_term),
+            beta_sig_logbeta = float(logbeta_term),
+            beta_sig_before_logbeta = float(sig_term_before_logbeta),
             V_belonging = float(V_belonging_summed),
             V_notbelonging = float(V_not_belonging_summed)
-            )        
-    if DEBUG:
-        total_loss = components['V']+components['beta']
-        loss_fractions = { k : v/total_loss for k, v in components.items() }
-        fkey = lambda key: f'{components[key]:10.4f} ({100.*loss_fractions[key]:.1f}%)'
-        debug(f'test loss: {total_loss :.4f}')
-        debug(f'  V    = {fkey("V")}')
-        debug(f'    like-term     = {fkey("V_belonging")}')
-        debug(f'    not-like-term = {fkey("V_notbelonging")}')
-        debug(f'  beta = {fkey("beta")}')
-        debug(f'    sig           = {fkey("beta_sig")}')
-        debug(f'    bkg           = {fkey("beta_bkg")}')
+            )
+    if DEBUG: debug(formatted_loss_components_string(components))
     if return_components:
         return LV, Lbeta, components
     else:
         return LV, Lbeta
+
+
+def formatted_loss_components_string(components):
+    total_loss = components['V']+components['beta']
+    fractions = { k : v/total_loss for k, v in components.items() }
+    fkey = lambda key: f'{components[key]:10.4f} ({100.*fractions[key]:.1f}%)'
+    return (
+        f'test loss: {total_loss :.4f}'
+        f'\n  V    = {fkey("V")}'
+        f'\n    like-term     = {fkey("V_belonging")}'
+        f'\n    not-like-term = {fkey("V_notbelonging")}'
+        f'\n  beta = {fkey("beta")}'
+        f'\n    sig           = {fkey("beta_sig")}'
+        f' ({components["beta_sig_before_logbeta"]:.4f} + {components["beta_sig_logbeta"]:+.4f})'
+        f'\n    bkg           = {fkey("beta_bkg")}'
+        )
 
 
 def softclip(array, start_clip_value):

@@ -28,8 +28,8 @@ def main():
     # dataset, _ = TauDataset('data/taus').split(.01) # Only use 10% for debugging
     dataset = TauDataset('data/taus')
     if args.dry:
-        keep = .01
-        print(f'Keeping only {100.*keep:.0f}% of events for debugging')
+        keep = .005
+        print(f'Keeping only {100.*keep:.1f}% of events for debugging')
         dataset, _ = dataset.split(keep)
     train_dataset, test_dataset = dataset.split(.8)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
@@ -40,6 +40,9 @@ def main():
     epoch_size = len(train_loader.dataset)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
     # scheduler = CyclicLRWithRestarts(optimizer, batch_size, epoch_size, restart_period=400, t_mult=1.1, policy="cosine")
+
+    loss_offset = 1.0e4
+    loss_offset = 0.
 
     def loss_fn(out, data, s_c=1., return_components=False):
         device = out.device
@@ -62,7 +65,7 @@ def main():
             return out[2]
         else:
             LV, Lbeta = out[:2]
-            return LV + Lbeta
+            return LV + Lbeta + loss_offset
         # Lp = objectcondensation.calc_Lp(
         #     pred_betas,
         #     data.y.long(),
@@ -87,6 +90,7 @@ def main():
                 optimizer.step()
                 # scheduler.batch_step()
                 pbar.set_postfix({'loss': float(loss)})
+                # if i == 2: raise Exception
         except Exception:
             print('Exception encountered:', data, ', npzs:')
             print('  ' + '\n  '.join([train_dataset.npzs[int(i)] for i in data.inpz]))
@@ -94,14 +98,10 @@ def main():
 
     def test(epoch):
         N_test = len(test_loader)
-        loss_components = dict(
-            V = 0., beta = 0.,
-            beta_sig = 0., beta_bkg = 0.,
-            V_belonging = 0.,
-            V_notbelonging = 0.
-            )
+        loss_components = {}
         def update(components):
             for key, value in components.items():
+                if not key in loss_components: loss_components[key] = 0.
                 loss_components[key] += value
         with torch.no_grad():
             model.eval()
@@ -123,7 +123,8 @@ def main():
         print(f'  beta = {fkey("beta")}')
         print(f'    sig           = {fkey("beta_sig")}')
         print(f'    bkg           = {fkey("beta_bkg")}')
-        return total_loss
+        print(f'Returning {loss_offset + total_loss}')
+        return loss_offset + total_loss
 
     ckpt_dir = strftime('ckpts_gravnet_%b%d')
     def write_checkpoint(checkpoint_number=None, best=False):
