@@ -159,7 +159,8 @@ def calc_LV_Lbeta(
     assert norms.device == device
 
     # Mask out norms of hits to clusters in other events
-    norms *= get_inter_event_norms_mask(batch, n_clusters_per_event)
+    inter_event_norms_mask = get_inter_event_norms_mask(batch, n_clusters_per_event)
+    norms *= inter_event_norms_mask
 
     # Index to matrix, e.g.:
     # [1, 3, 1, 0] --> [
@@ -181,7 +182,8 @@ def calc_LV_Lbeta(
     # they are only pushed away
     if huberize_norm_for_V_belonging:
         # Huberized version (linear but times 4)
-        norms_V_belonging = huber(norms+1e-5, 4.)
+        # Re-zero out the norms of hits to clusters from other events
+        norms_V_belonging = huber((norms+1e-5)*inter_event_norms_mask, 4.)
     else:
         # Paper version is simply norms squared
         norms_V_belonging = norms**2
@@ -192,7 +194,8 @@ def calc_LV_Lbeta(
     # Potential for hits w.r.t. the cluster they DO NOT belong to
     if gaussian_norm_for_V_notbelonging:
         # Gaussian scaling term instead of a cone
-        norms_V_notbelonging = torch.exp(-4.*norms**2)
+        # Re-zero out the norms of hits to clusters from other events
+        norms_V_notbelonging = torch.exp(-4.*norms**2) * inter_event_norms_mask
     else:
         # Paper version is simply linear norms
         norms_V_notbelonging = norms
@@ -268,15 +271,42 @@ def calc_LV_Lbeta(
         assert is_object.size(0) == n_clusters
         n_objects = is_object.sum()
 
-        # Get the norms w.r.t. objects only (throw away norms w.r.t. noise clusters)
-        norms_wrt_object = norms[:,is_object]
-        # Apply transformation and sum over hits
-        norms_term = (1./(20.*norms_wrt_object+1.)).sum(dim=0)
-        assert norms_term.size() == (n_objects,)
-        assert_no_nans(norms_term)
-
         n_hits_per_object = scatter_count(cluster_index)[is_object]
         assert torch.all(n_hits_per_object > 0)
+
+        # Get the norms w.r.t. objects only (throw away norms w.r.t. noise clusters)
+        # (n_hits x n_clusters) -> (n_hits x n_objects)
+        norms_wrt_object = norms[:,is_object]
+        assert norms_wrt_object.size() == (n_hits, n_objects)
+
+        # m = 20.
+        m = 2e5
+        
+        # raw_norms_term = 1./(m*norms_wrt_object**2+1.)
+        # raw_norms_term *= inter_event_norms_mask[:,is_object]
+        # print(raw_norms_term.max())
+        # print(raw_norms_term)
+        # print(raw_norms_term.sum(dim=0))
+        # global DEBUG
+        # DEBUG = True
+        # raise Exception
+
+        # HIER VERDER 
+        # Laatste print wordt 1 voor m->inf... 
+        # Offset probleem, met een willekeurige 1./1. die per ongeluk over blijft?
+        # Of precies de self-interaction... die is norm=0. per definitie
+        # En is er ook precies 1 per cluster
+        # --> DIT IS WAT JAN BEDOELT MET SELF-INTERACTION!
+
+        # Apply transformation and sum over hits
+        # Re-zero out the norms of hits to objects from other events
+        norms_term = 1. - (
+            inter_event_norms_mask[:,is_object] * 1./(m*norms_wrt_object**2+1.)
+            ).sum(dim=0)
+        # Re the `1. - `, note Jan: "remove self-interaction term (just for offset)"
+        assert norms_term.size() == (n_objects,)
+        assert_no_nans(norms_term)
+        
         sig_term = ((norms_term * beta_alpha[is_object]) / n_hits_per_object)
         assert sig_term.size() == (n_objects,)
         assert_no_nans(sig_term)
@@ -304,20 +334,26 @@ def calc_LV_Lbeta(
 
     if DEBUG or return_components:
         # Calculate the individual components of the V loss
-        V_belonging_summed = torch.sum(q.unsqueeze(-1) * V_belonging / n_hits_expanded.unsqueeze(-1))
-        V_not_belonging_summed = torch.sum(q.unsqueeze(-1) * V_notbelonging / n_hits_expanded.unsqueeze(-1))
-    if DEBUG:
-        debug(
-            f'LV={LV:.6f} (like-term={V_belonging_summed:.4f}, not-like-term={V_not_belonging_summed}),'
-            f'Lbeta={Lbeta:.ff} (sig={sig_term:.4f}, bkg={bkg_term:.4f})'
-            )
-    if return_components:
+        V_belonging_summed = float(torch.sum(q.unsqueeze(-1) * V_belonging / n_hits_expanded.unsqueeze(-1)))
+        V_not_belonging_summed = float(torch.sum(q.unsqueeze(-1) * V_notbelonging / n_hits_expanded.unsqueeze(-1)))
         components = dict(
             V = float(LV), beta = float(Lbeta),
             beta_sig = float(sig_term), beta_bkg = float(bkg_term),
             V_belonging = float(V_belonging_summed),
             V_notbelonging = float(V_not_belonging_summed)
-            )
+            )        
+    if DEBUG:
+        total_loss = components['V']+components['beta']
+        loss_fractions = { k : v/total_loss for k, v in components.items() }
+        fkey = lambda key: f'{components[key]:10.4f} ({100.*loss_fractions[key]:.1f}%)'
+        debug(f'test loss: {total_loss :.4f}')
+        debug(f'  V    = {fkey("V")}')
+        debug(f'    like-term     = {fkey("V_belonging")}')
+        debug(f'    not-like-term = {fkey("V_notbelonging")}')
+        debug(f'  beta = {fkey("beta")}')
+        debug(f'    sig           = {fkey("beta_sig")}')
+        debug(f'    bkg           = {fkey("beta_bkg")}')
+    if return_components:
         return LV, Lbeta, components
     else:
         return LV, Lbeta
@@ -613,12 +649,13 @@ def get_inter_event_norms_mask(batch: torch.LongTensor, nclusters_per_event: tor
         [0, 0, 0, 0, 0, 1, 1],
         ])
     """
+    device = batch.device
     # Following the example:
     # Expand batch to the following (nhits x nevents) matrix (little hacky, boolean mask -> long):
     # [[1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     #  [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0],
     #  [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1]]
-    batch_expanded_as_ones = (batch == torch.arange(batch.max()+1, dtype=torch.long).unsqueeze(-1) ).long()
+    batch_expanded_as_ones = (batch == torch.arange(batch.max()+1, dtype=torch.long, device=device).unsqueeze(-1) ).long()
     # Then repeat_interleave it to expand it to nclusters rows, and transpose to get (nhits x nclusters)
     return batch_expanded_as_ones.repeat_interleave(nclusters_per_event, dim=0).T
 
