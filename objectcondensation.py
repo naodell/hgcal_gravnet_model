@@ -287,9 +287,6 @@ def calc_LV_Lbeta(
         norms_wrt_object = (M*norms)[:,is_object]
         assert norms_wrt_object.size() == (n_hits, n_objects)
 
-        m = 20.
-        # m = 2e5
-        
         # raw_norms_term = 1./(m*norms_wrt_object**2+1.)
         # raw_norms_term *= inter_event_norms_mask[:,is_object]
         # print(raw_norms_term.max())
@@ -298,13 +295,6 @@ def calc_LV_Lbeta(
         # global DEBUG
         # DEBUG = True
         # raise Exception
-
-        # HIER VERDER 
-        # Laatste print wordt 1 voor m->inf... 
-        # Offset probleem, met een willekeurige 1./1. die per ongeluk over blijft?
-        # Of precies de self-interaction... die is norm=0. per definitie
-        # En is er ook precies 1 per cluster
-        # --> DIT IS WAT JAN BEDOELT MET SELF-INTERACTION!
 
         debug('n_hits_per_object:', n_hits_per_object)
         debug('n_hits_per_event:', n_hits_per_event)
@@ -319,7 +309,7 @@ def calc_LV_Lbeta(
         # debug('mask:', mask)
         # assert mask.size() == (n_hits, n_objects)
 
-        norms_term = (1./(20.*norms_wrt_object**2+1.) * M[:,is_object]).sum(dim=0)
+        norms_term = 1. - (1./(20.*norms_wrt_object**2+1.) * M[:,is_object]).sum(dim=0)
 
         # norms_term = torch.where(
         #     mask,
@@ -400,7 +390,7 @@ def formatted_loss_components_string(components):
     fractions = { k : v/total_loss for k, v in components.items() }
     fkey = lambda key: f'{components[key]:10.4f} ({100.*fractions[key]:.1f}%)'
     return (
-        f'test loss: {total_loss :.4f}'
+        f'loss: {total_loss :.4f}'
         f'\n  V    = {fkey("V")}'
         f'\n    like-term     = {fkey("V_belonging")}'
         f'\n    not-like-term = {fkey("V_notbelonging")}'

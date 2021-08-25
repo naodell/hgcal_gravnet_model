@@ -107,13 +107,33 @@ class BlobsDataset(Dataset):
         
 
 class TauDataset(Dataset):
-    def __init__(self, path):
+    """
+    Features in x:
+
+    recHitEnergy,
+    recHitEta,
+    zeroFeature, #indicator if it is track or not
+    recHitTheta,
+    recHitR,
+    recHitX,
+    recHitY,
+    recHitZ,
+    recHitTime
+    (https://github.com/cms-pepr/HGCalML/blob/master/modules/datastructures/TrainData_NanoML.py#L211-L221)
+    """
+    def __init__(self, path, flip=True):
         super(TauDataset, self).__init__(path)
         self.npzs = list(sorted(glob.iglob(path + '/*.npz')))
+        self.flip = flip
     
     def get(self, i):
         d = np.load(self.npzs[i])
         x = d['recHitFeatures']
+        if self.flip and np.mean(x[:,7]) < 0:
+            # Negative endcap: Flip z-dependent coordinates
+            print(f'Flipping {i}')
+            x[:,1] *= -1 # eta
+            x[:,7] *= -1 # z
         cluster_index = incremental_cluster_index_np(d['recHitTruthClusterIdx'].squeeze())
         truth_cluster_props = np.hstack((
             d['recHitTruthEnergy'],
@@ -297,10 +317,28 @@ def test_blobs():
     print(LV, Lbeta)
 
 
+def test_z_flipping():
+    dataset = TauDataset('data/taus')
+
+    def print_some_numbers(event):
+        print('New event')
+        for i in range(9):
+            print('  ', i, ':', event.x[:,i].numpy())
+
+    event = dataset.get(0)
+    print_some_numbers(event)
+
+    event = dataset.get(1)
+    print_some_numbers(event)
+
+    dataset.flip = False
+    event = dataset.get(1)
+    print_some_numbers(event)
 
 
 def main():
-    test_full_chain()
+    test_z_flipping()
+    # test_full_chain()
     # test_blobs()
     # test_incremental_cluster_index()
 
