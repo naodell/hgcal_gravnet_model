@@ -113,15 +113,7 @@ def main():
             loss_components[key] /= N_test
         # Compute total loss and do printout
         total_loss = loss_components['V']+loss_components['beta']
-        loss_fractions = { k : v/total_loss for k, v in loss_components.items() }
-        fkey = lambda key: f'{loss_components[key]:10.4f} ({100.*loss_fractions[key]:.1f}%)'
-        print(f'test loss: {total_loss :.4f}')
-        print(f'  V    = {fkey("V")}')
-        print(f'    like-term     = {fkey("V_belonging")}')
-        print(f'    not-like-term = {fkey("V_notbelonging")}')
-        print(f'  beta = {fkey("beta")}')
-        print(f'    sig           = {fkey("beta_sig")}')
-        print(f'    bkg           = {fkey("beta_bkg")}')
+        print('test ' + objectcondensation.formatted_loss_components_string(loss_components))
         print(f'Returning {loss_offset + total_loss}')
         return loss_offset + total_loss
 
