@@ -40,8 +40,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
     # scheduler = CyclicLRWithRestarts(optimizer, batch_size, epoch_size, restart_period=400, t_mult=1.1, policy="cosine")
 
-    loss_offset = 1.0e4
-    loss_offset = 0.
+    loss_offset = 1. # To prevent a negative loss from ever occuring
 
     def loss_fn(out, data, s_c=1., return_components=False):
         device = out.device

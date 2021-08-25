@@ -131,7 +131,6 @@ class TauDataset(Dataset):
         x = d['recHitFeatures']
         if self.flip and np.mean(x[:,7]) < 0:
             # Negative endcap: Flip z-dependent coordinates
-            print(f'Flipping {i}')
             x[:,1] *= -1 # eta
             x[:,7] *= -1 # z
         cluster_index = incremental_cluster_index_np(d['recHitTruthClusterIdx'].squeeze())

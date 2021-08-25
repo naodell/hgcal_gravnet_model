@@ -305,10 +305,7 @@ def calc_LV_Lbeta(
         # debug('n_sig_hits_per_event_expanded:', n_sig_hits_per_event_expanded)
 
 
-        # mask = is_sig.unsqueeze(-1) & inter_event_norms_mask[:,is_object].bool()
-        # debug('mask:', mask)
-        # assert mask.size() == (n_hits, n_objects)
-
+        # Re the `1. - `, note Jan: "remove self-interaction term (just for offset)"
         norms_term = 1. - (1./(20.*norms_wrt_object**2+1.) * M[:,is_object]).sum(dim=0)
 
         # norms_term = torch.where(
@@ -327,12 +324,6 @@ def calc_LV_Lbeta(
         # norms_term = norms_term.sum(dim=0)
         assert norms_term.size() == (n_objects,)
         assert_no_nans(norms_term)
-
-        # Re-zero out the norms of hits to objects from other events
-        # norms_term = 1. - transformed_norms.sum(dim=0)
-        # Re the `1. - `, note Jan: "remove self-interaction term (just for offset)"
-        # assert norms_term.size() == (n_objects,)
-        # assert_no_nans(norms_term)
         
         sig_term = ((norms_term * beta_alpha[is_object]) / n_hits_per_object)
         # sig_term = ((norms_term * beta_alpha[is_object]) / n_sig_hits_per_event_expanded)
