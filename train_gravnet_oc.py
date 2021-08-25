@@ -116,7 +116,7 @@ def main():
         print(f'Returning {loss_offset + total_loss}')
         return loss_offset + total_loss
 
-    ckpt_dir = strftime('ckpts_gravnet_%b%d')
+    ckpt_dir = strftime('ckpts_gravnet_%b%d_%H%M')
     def write_checkpoint(checkpoint_number=None, best=False):
         ckpt = 'ckpt_best.pth.tar' if best else 'ckpt_{0}.pth.tar'.format(checkpoint_number)
         ckpt = osp.join(ckpt_dir, ckpt)

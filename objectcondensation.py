@@ -306,38 +306,36 @@ def calc_LV_Lbeta(
 
 
         # Re the `1. - `, note Jan: "remove self-interaction term (just for offset)"
-        norms_term = 1. - (1./(20.*norms_wrt_object**2+1.) * M[:,is_object]).sum(dim=0)
-
-        # norms_term = torch.where(
-        #     mask,
-        #     1./(m*norms_wrt_object**2+1.),
-        #     torch.zeros_like(norms_wrt_object)
-        #     )
-        # # # Apply transformation and re-zero out the norms of hits to objects from other events
-        # # norms_term = (
-        # #     is_sig.unsqueeze(-1).long() * inter_event_norms_mask[:,is_object]
-        # #     * 1./(m*norms_wrt_object**2+1.)
-        # #     )
+        norms_term = (1./(20.*norms_wrt_object**2+1.) * M[:,is_object]).sum(dim=0)
         debug('norms_term:', norms_term)
-        # debug('norms_term.sum(dim=0):', norms_term.sum(dim=0))
-
-        # norms_term = norms_term.sum(dim=0)
         assert norms_term.size() == (n_objects,)
         assert_no_nans(norms_term)
+        assert torch.all(norms_term >= 1.) and torch.all(norms_term <= n_hits_per_object)
+        debug('norms_term:', norms_term)
+        norms_term = 1. - norms_term
+        assert torch.all(norms_term >= -n_hits_per_object) and torch.all(norms_term <= 0.)
+        debug('norms_term:', norms_term)
         
-        sig_term = ((norms_term * beta_alpha[is_object]) / n_hits_per_object)
-        # sig_term = ((norms_term * beta_alpha[is_object]) / n_sig_hits_per_event_expanded)
-        assert sig_term.size() == (n_objects,)
-        assert_no_nans(sig_term)
+        norms_term /= n_hits_per_object
+        debug('norms_term:', norms_term)
+        assert torch.all(norms_term >= -1.) and torch.all(norms_term <= 0.)
 
-        # Note Jan: "now 'standard' 1-beta"
-        logbeta_term = -.2*torch.log(beta_alpha[is_object]+1e-9)
-        sig_term_before_logbeta = sig_term.clone()
-        sig_term += logbeta_term
+        norms_term *= beta_alpha[is_object]
+        assert torch.all(norms_term >= -1.) and torch.all(norms_term <= 0.)
+        assert norms_term.size() == (n_objects,)
+        assert_no_nans(norms_term)
 
         # Number of objects per event K, expand from (n_events,) to (n_objects,)
         K = torch.repeat_interleave(n_objects_per_event, n_objects_per_event)
         assert K.size() == (n_objects,)
+
+        # Sanity check assert
+        norms_term_sum = (norms_term/K).sum()
+        assert norms_term_sum >= -batch_size and norms_term_sum <= 0.
+
+        # Note Jan: "now 'standard' 1-beta"
+        logbeta_term = -.2*torch.log(beta_alpha[is_object]+1e-9)
+        sig_term = norms_term + logbeta_term
 
         # Divide by number of objects per event K; repeat_interleave to match dimensions
         sig_term /= K
@@ -346,13 +344,11 @@ def calc_LV_Lbeta(
 
         # Sum up the sig_terms per object
         sig_term = sig_term.sum()
+        assert_no_nans(sig_term)
 
         # Other terms
         if DEBUG or return_components:
-            logbeta_term = (logbeta_term/K).sum()
-            sig_term_before_logbeta = (sig_term_before_logbeta/K).sum()
-
-    assert_no_nans(sig_term)
+            logbeta_term_sum = (logbeta_term/K).sum()
 
     # Final Lbeta
     Lbeta = sig_term + bkg_term
@@ -362,18 +358,22 @@ def calc_LV_Lbeta(
         V_belonging_summed = float(torch.sum(q.unsqueeze(-1) * V_belonging / n_hits_expanded.unsqueeze(-1)))
         V_not_belonging_summed = float(torch.sum(q.unsqueeze(-1) * V_notbelonging / n_hits_expanded.unsqueeze(-1)))
         components = dict(
-            V = float(LV), beta = float(Lbeta),
-            beta_sig = float(sig_term), beta_bkg = float(bkg_term),
-            beta_sig_logbeta = float(logbeta_term),
-            beta_sig_before_logbeta = float(sig_term_before_logbeta),
+            V = float(LV),
+            beta = float(Lbeta),
+            beta_sig = float(sig_term),
+            beta_sig_logbeta = float(logbeta_term_sum),
+            beta_sig_normsterm = float(norms_term_sum),
+            beta_bkg = float(bkg_term),
             V_belonging = float(V_belonging_summed),
             V_notbelonging = float(V_not_belonging_summed)
             )
+        # Divide by batch_size
+        components = {k : v/batch_size for k, v in components.items()}
     if DEBUG: debug(formatted_loss_components_string(components))
     if return_components:
-        return LV, Lbeta, components
+        return LV/batch_size, Lbeta/batch_size, components
     else:
-        return LV, Lbeta
+        return LV/batch_size, Lbeta/batch_size
 
 
 def formatted_loss_components_string(components):
@@ -387,7 +387,7 @@ def formatted_loss_components_string(components):
         f'\n    not-like-term = {fkey("V_notbelonging")}'
         f'\n  beta = {fkey("beta")}'
         f'\n    sig           = {fkey("beta_sig")}'
-        f' (potentiallike={components["beta_sig_before_logbeta"]:.4f}, beta_contr={components["beta_sig_logbeta"]:.4f})'
+        f' (normsterm={components["beta_sig_normsterm"]:.4f}, logbeta={components["beta_sig_logbeta"]:.4f})'
         f'\n    bkg           = {fkey("beta_bkg")}'
         )
 
