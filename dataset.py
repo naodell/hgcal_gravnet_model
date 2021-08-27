@@ -2,6 +2,7 @@ import glob
 import numpy as np
 np.random.seed(1001)
 
+import tqdm
 import torch
 from torch_geometric.data import (Data, Dataset, DataLoader)
 from sklearn.datasets import make_blobs
@@ -120,7 +121,14 @@ class TauDataset(Dataset):
         super(TauDataset, self).__init__(path)
         self.npzs = list(sorted(glob.iglob(path + '/*.npz')))
         self.flip = flip
-    
+
+    def blacklist(self, npzs):
+        """
+        Remove a list of npzs from the dataset
+        Useful to remove bad events
+        """
+        for npz in npzs: self.npzs.remove(npz)
+
     def get(self, i):
         d = np.load(self.npzs[i])
         x = d['recHitFeatures']
@@ -129,6 +137,7 @@ class TauDataset(Dataset):
             x[:,1] *= -1 # eta
             x[:,7] *= -1 # z
         cluster_index = incremental_cluster_index_np(d['recHitTruthClusterIdx'].squeeze())
+        if np.all(cluster_index == 0): print('WARNING: No objects in', self.npzs[i])
         truth_cluster_props = np.hstack((
             d['recHitTruthEnergy'],
             d['recHitTruthPosition'],
@@ -330,8 +339,19 @@ def test_z_flipping():
     print_some_numbers(event)
 
 
+def find_no_object_events():
+    npzs = glob.glob('data/taus/*.npz')
+    npzs.sort()
+    print('npzs with no objects:')
+    for npz in tqdm.tqdm(npzs):
+        if np.all(np.load(npz)['recHitTruthClusterIdx'].squeeze() == -1):
+            print(npz)
+    print('done')
+
+
 def main():
-    test_z_flipping()
+    find_no_object_events()
+    # test_z_flipping()
     # test_full_chain()
     # test_blobs()
     # test_incremental_cluster_index()

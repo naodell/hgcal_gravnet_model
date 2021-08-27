@@ -26,6 +26,18 @@ def main():
 
     shuffle = True
     dataset = TauDataset('data/taus')
+    dataset.blacklist([ # Remove a bunch of bad events
+        'data/taus/110_nanoML_98.npz',
+        'data/taus/113_nanoML_13.npz',
+        'data/taus/124_nanoML_77.npz',
+        'data/taus/128_nanoML_70.npz',
+        'data/taus/149_nanoML_90.npz',
+        'data/taus/153_nanoML_22.npz',
+        'data/taus/26_nanoML_93.npz',
+        'data/taus/32_nanoML_45.npz',
+        'data/taus/5_nanoML_51.npz',
+        'data/taus/86_nanoML_97.npz',
+        ])
     if args.dry:
         keep = .005
         print(f'Keeping only {100.*keep:.1f}% of events for debugging')
@@ -135,23 +147,28 @@ def main():
             write_checkpoint(i_epoch, best=True)
 
 def debug():
+    objectcondensation.DEBUG = True
     dataset = TauDataset('data/taus')
     dataset.npzs = [
-        'data/taus/112_nanoML_93.npz',
-        'data/taus/106_nanoML_29.npz',
-        'data/taus/100_nanoML_56.npz',
-        'data/taus/110_nanoML_81.npz',
+        # 'data/taus/49_nanoML_84.npz',
+        # 'data/taus/37_nanoML_4.npz',
+        'data/taus/26_nanoML_93.npz',
+        # 'data/taus/142_nanoML_75.npz',
         ]
-    loader = DataLoader(dataset, batch_size=4, shuffle=False)
-    model = GravnetModel(input_dim=9, output_dim=8)
-
+    for data in DataLoader(dataset, batch_size=len(dataset), shuffle=False): break
+    print(data.y.sum())
+    model = GravnetModel(input_dim=9, output_dim=4)
     with torch.no_grad():
         model.eval()
-        for data in loader:
-            result = model(data.x, data.batch)
-            loss = loss_fn(result, data)
-            print(result)
-
+        out = model(data.x, data.batch)
+    pred_betas = torch.sigmoid(out[:,0])
+    pred_cluster_space_coords = out[:,1:4]
+    out_oc = objectcondensation.calc_LV_Lbeta(
+        pred_betas,
+        pred_cluster_space_coords,
+        data.y.long(),
+        data.batch.long()
+        )
 
 def run_profile():
     from torch.profiler import profile, record_function, ProfilerActivity
