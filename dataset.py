@@ -3,12 +3,7 @@ import numpy as np
 np.random.seed(1001)
 
 import torch
-from torch import Tensor
-import torch.nn as nn
-from torch.nn import Linear, ReLU
-from torch_scatter import scatter
-from torch_geometric.data import (Data, Dataset, DataLoader, dataloader)
-
+from torch_geometric.data import (Data, Dataset, DataLoader)
 from sklearn.datasets import make_blobs
 
 

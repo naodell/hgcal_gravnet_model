@@ -1,9 +1,7 @@
 import numpy as np
 import torch
-import torch.nn as nn
 from torch_scatter import scatter_max, scatter_add
 from torch_geometric.data import DataLoader
-import torch_scatter
 
 
 def make_fake_model(output_dim: int):
@@ -12,7 +10,7 @@ def make_fake_model(output_dim: int):
     with shape (x.size(0), output_dim), like the model would
     """
     def fake_model(x: Tensor, batch: Tensor) -> Tensor:
-        return torch.from_numpy(np.random.rand(x.size(0), output_dim)).type(torch.float)
+        return torch.rand(x.size(0), output_dim)
     return fake_model
 
 def assert_no_nans(x):
@@ -25,6 +23,244 @@ DEBUG = False
 def debug(*args, **kwargs):
     if DEBUG: print(*args, **kwargs)
 
+
+def calc_LV_Lbeta_refactored(
+    beta: torch.Tensor, cluster_space_coords: torch.Tensor, # Predicted by model
+    cluster_index_per_event: torch.Tensor, # Truth hit->cluster index
+    batch: torch.Tensor,
+    # From here on just parameters
+    qmin: float = .1,
+    s_B: float = .1,
+    noise_cluster_index: int = 0, # cluster_index entries with this value are noise/noise
+    beta_stabilizing = 'soft_q_scaling',
+    huberize_norm_for_V_belonging = True,
+    gaussian_norm_for_V_notbelonging = True,
+    potentiallike_beta_loss = True,
+    return_components = False
+    ):
+    """
+    Calculates the L_V and L_beta object condensation losses.
+
+    Concepts:
+    - A hit belongs to exactly one cluster (cluster_index_per_event is (n_hits,)),
+      and to exactly one event (batch is (n_hits,))
+    - A cluster index of `noise_cluster_index` means the cluster is a noise cluster.
+      There is typically one noise cluster per event. Any hit in a noise cluster
+      is a 'noise hit'. A hit in an object is called a 'signal hit' for lack of a
+      better term.
+    - An 'object' is a cluster that is *not* a noise cluster. 
+    """
+    device = beta.device
+
+    # ________________________________
+    # Calculate a bunch of needed counts and indices locally
+
+    # cluster_index: unique index over events
+    # E.g. cluster_index_per_event=[ 0, 0, 1, 2, 0, 0, 1], batch=[0, 0, 0, 0, 1, 1, 1]
+    #      -> cluster_index=[ 0, 0, 1, 2, 3, 3, 4 ]
+    cluster_index, n_clusters_per_event = batch_cluster_indices(cluster_index_per_event, batch)
+    n_clusters = n_clusters_per_event.sum()
+    n_hits, cluster_space_dim = cluster_space_coords.size()
+    batch_size = batch.max()+1
+    n_hits_per_event = scatter_count(batch)
+
+    # Index of cluster -> event (n_clusters,)
+    batch_cluster = scatter_counts_to_indices(n_clusters_per_event)
+
+    # Per-hit boolean, indicating whether hit is sig or noise
+    is_noise = cluster_index_per_event == noise_cluster_index
+    is_sig = ~is_noise
+    n_hits_sig = is_sig.sum()
+    n_sig_hits_per_event = scatter_count(batch[is_sig])
+
+    # Per-cluster boolean, indicating whether cluster is an object or noise
+    is_object = scatter_max(is_sig.long(), cluster_index)[0].bool()
+    is_noise_cluster = ~is_object
+
+    # FIXME: This assumes bkg_cluster_index == 0!!
+    # Not sure how to do this in a performant way in case bkg_cluster_index != 0
+    object_index_per_event = cluster_index_per_event[is_sig] - 1
+    object_index, n_objects_per_event = batch_cluster_indices(object_index_per_event, batch[is_sig])
+    n_hits_per_object = scatter_count(object_index)
+    batch_object = batch_cluster[is_object]
+    n_objects = is_object.sum()
+
+    assert object_index.size() == (n_hits_sig,)
+    assert is_object.size() == (n_clusters,)
+    assert torch.all(n_hits_per_object > 0)
+    assert object_index.max()+1 == n_objects
+
+    # ________________________________
+    # L_V term
+
+    # Calculate q
+    if beta_stabilizing == 'paper':
+        q = beta.arctanh()**2 + qmin
+    elif beta_stabilizing == 'clip':
+        beta = beta.clip(0., 1-1e-4)
+        q = beta.arctanh()**2 + qmin
+    elif beta_stabilizing == 'soft_q_scaling':
+        q = (beta.clip(0., 1-1e-4)/1.002).arctanh()**2 + qmin
+    else:
+        raise ValueError(f'beta_stablizing mode {beta_stabilizing} is not known')
+    assert_no_nans(q)
+    assert q.device == device
+    assert q.size() == (n_hits,)
+
+    # Calculate q_alpha, the max q per object, and the indices of said maxima
+    q_alpha, index_alpha = scatter_max(q[is_sig], object_index)
+    assert q_alpha.size() == (n_objects,)
+
+    # Get the cluster space coordinates and betas for these maxima hits too
+    x_alpha = cluster_space_coords[is_sig][index_alpha]
+    beta_alpha = beta[is_sig][index_alpha]
+    assert x_alpha.size() == (n_objects, cluster_space_dim)
+    assert beta_alpha.size() == (n_objects,)
+
+    # Connectivity matrix from hit (row) -> cluster (column)
+    # Index to matrix, e.g.:
+    # [1, 3, 1, 0] --> [
+    #     [0, 1, 0, 0],
+    #     [0, 0, 0, 1],
+    #     [0, 1, 0, 0],
+    #     [1, 0, 0, 0]
+    #     ]
+    M = torch.nn.functional.one_hot(cluster_index).long()
+
+    # Anti-connectivity matrix; be sure not to connect hits to clusters in different events!
+    M_inv = get_inter_event_norms_mask(batch, n_clusters_per_event) - M
+
+    # Throw away noise cluster columns; we never need them
+    M = M[:,is_object]
+    M_inv = M_inv[:,is_object]
+    assert M.size() == (n_hits, n_objects)
+    assert M_inv.size() == (n_hits, n_objects)
+
+    # Calculate all norms
+    # Warning: Should not be used without a mask!
+    # Contains norms between hits and objects from different events
+    # (n_hits, 1, cluster_space_dim) - (1, n_objects, cluster_space_dim)
+    #   gives (n_hits, n_objects, cluster_space_dim)
+    norms = (cluster_space_coords.unsqueeze(1) - x_alpha.unsqueeze(0)).norm(dim=-1)
+    assert norms.size() == (n_hits, n_objects)
+
+    # -------
+    # Attractive potential term
+
+    # First get all the relevant norms: We only want norms of signal hits
+    # w.r.t. the object they belong to, i.e. no noise hits and no noise clusters.
+    # First select all norms of all signal hits w.r.t. all objects, mask out later
+    norms_att = norms[is_sig]
+
+    # Power-scale the norms
+    if huberize_norm_for_V_belonging:
+        # Huberized version (linear but times 4)
+        # Be sure to not move 'off-diagonal' away from zero
+        # (i.e. norms of hits w.r.t. clusters they do _not_ belong to)
+        norms_att = huber(norms_att+1e-5, 4.)
+    else:
+        # Paper version is simply norms squared (no need for mask)
+        norms_att = norms_att**2
+    assert norms_att.size() == (n_hits_sig, n_objects)
+
+    # Now apply the mask to keep only norms of signal hits w.r.t. to the object
+    # they belong to
+    norms_att *= M[is_sig]
+
+    # Final potential term
+    # (n_sig_hits, 1) * (1, n_objects) * (n_sig_hits, n_objects)
+    V_attractive = q[is_sig].unsqueeze(-1) * q_alpha.unsqueeze(0) * norms_att
+    assert V_attractive.size() == (n_hits_sig, n_objects)
+
+    # Sum over hits, then sum per event, then divide by n_hits_per_event, then sum over events
+    V_attractive = scatter_add(V_attractive.sum(dim=0), batch_object) / n_hits_per_event
+    assert V_attractive.size() == (batch_size,)
+    L_V_attractive = V_attractive.sum()
+
+    # -------
+    # Repulsive potential term
+
+    # Get all the relevant norms: We want norms of any hit w.r.t. to 
+    # objects they do *not* belong to, i.e. no noise clusters.
+    # We do however want to keep norms of noise hits w.r.t. objects
+    norms_rep = norms * M_inv
+
+    # Power-scale the norms
+    if gaussian_norm_for_V_notbelonging:
+        # Gaussian scaling term instead of a cone
+        norms_rep = torch.exp(-4.*norms_rep**2)
+    else:
+        # Paper version is simply linear norms
+        norms_rep = norms_rep
+    
+    # Now mask out the norms of hits w.r.t. the cluster they belong to
+    norms_rep *= M_inv
+
+    # (n_sig_hits, 1) * (1, n_objects) * (n_sig_hits, n_objects)
+    V_repulsive = q.unsqueeze(1) * q_alpha.unsqueeze(0) * norms_rep
+    # No need to apply a V = max(0, V); by construction V>=0
+    assert V_repulsive.size() == (n_hits, n_objects)
+
+    # Sum over hits, then sum per event, then divide by n_hits_per_event, then sum up events
+    L_V_repulsive = (scatter_add(V_repulsive.sum(dim=0), batch_object)/n_hits_per_event).sum()
+    L_V = L_V_attractive + L_V_repulsive
+
+    # ________________________________
+    # L_beta term
+
+    # -------
+    # L_beta noise term
+    
+    n_noise_hits_per_event = scatter_count(batch[is_noise])
+    L_beta_noise = s_B * ((scatter_add(beta[is_noise], batch[is_noise])) / n_noise_hits_per_event).sum()
+
+    # -------
+    # L_beta signal term
+    
+    # First collect the norms: We only want norms of hits w.r.t. the object they
+    # belong to (like in V_attractive)
+    norms_beta_sig = norms[is_sig]
+    # Apply transformation first, and then apply mask to keep only the norms we want,
+    # then sum over hits, so the result is (n_objects,)
+    norms_beta_sig = (1./(20.*norms_beta_sig**2+1.) * M[is_sig]).sum(dim=0)
+    assert torch.all(norms_beta_sig >= 1.) and torch.all(norms_beta_sig <= n_hits_per_object)
+    # Subtract from 1. to remove self interaction, divide by number of hits per object
+    norms_beta_sig = (1. - norms_beta_sig) / n_hits_per_object
+    assert torch.all(norms_beta_sig >= -1.) and torch.all(norms_beta_sig <= 0.)
+    norms_beta_sig *= beta_alpha
+
+    # Sum over objects, divide by number of objects per event, then sum over events
+    L_beta_norms_term = (scatter_add(norms_beta_sig, batch_object) / n_objects_per_event).sum()
+    assert L_beta_norms_term >= -batch_size and L_beta_norms_term <= 0.
+
+    # Logbeta term: Take -.2*torch.log(beta_alpha[is_object]+1e-9), sum it over objects,
+    # divide by n_objects_per_event, then sum over events (same pattern as above)
+    L_beta_logbeta_term = (
+        scatter_add(-.2*torch.log(beta_alpha+1e-9), batch_object) / n_objects_per_event
+        ).sum()
+
+    # Final L_beta term
+    L_beta_sig = L_beta_norms_term + L_beta_logbeta_term
+    L_beta = L_beta_noise + L_beta_sig
+
+    # ________________________________
+    # Returning
+    # Also divide by batch size here
+
+    if return_components or DEBUG:
+        components = dict(
+            L_V = L_V / batch_size,
+            L_V_attractive = L_V_attractive / batch_size,
+            L_V_repulsive = L_V_repulsive / batch_size,
+            L_beta = L_beta / batch_size,
+            L_beta_noise = L_beta_noise / batch_size,
+            L_beta_sig = L_beta_sig / batch_size,
+            L_beta_norms_term = L_beta_norms_term / batch_size,
+            L_beta_logbeta_term = L_beta_logbeta_term / batch_size,
+            )
+    if DEBUG:
+        debug(formatted_loss_components_string_refactored(components))
+    return components if return_components else L_V/batch_size, L_beta/batch_size
 
 
 def calc_LV_Lbeta(
@@ -197,14 +433,18 @@ def calc_LV_Lbeta(
     if gaussian_norm_for_V_notbelonging:
         # Gaussian scaling term instead of a cone
         # Re-zero out the norms of hits to clusters from other events
-        norms_V_notbelonging = torch.exp(-4.*norms**2) * inter_event_norms_mask
+        norms_V_notbelonging = torch.exp(-4.*norms**2)
+        V_notbelonging = inter_event_norms_mask * (1-M) * q_alpha_expanded * norms_V_notbelonging
+        # Also zero out norms w.r.t. to noise clusters
+        is_object = scatter_max(is_sig.long(), cluster_index)[0]
+        V_notbelonging *= is_object.unsqueeze(0)
     else:
         # Paper version is simply linear norms
         norms_V_notbelonging = norms
+        V_notbelonging = is_sig.unsqueeze(-1) * (1. - (1-M) * q_alpha_expanded * norms_V_notbelonging)
+        V_notbelonging[V_notbelonging < 0.] = 0. # Min of 0
     
     # Also here do not count notbelonging w.r.t. noise clusters
-    V_notbelonging = is_sig.unsqueeze(-1) * (1. - (1-M) * q_alpha_expanded * norms_V_notbelonging)
-    V_notbelonging[V_notbelonging < 0.] = 0. # Min of 0
     assert V_notbelonging.device == device
 
     # Count n_hits per entry in the batch (batch_size)
@@ -389,6 +629,23 @@ def formatted_loss_components_string(components):
         f'\n    sig           = {fkey("beta_sig")}'
         f' (normsterm={components["beta_sig_normsterm"]:.4f}, logbeta={components["beta_sig_logbeta"]:.4f})'
         f'\n    bkg           = {fkey("beta_bkg")}'
+        )
+
+def formatted_loss_components_string_refactored(components):
+    total_loss = components['L_V']+components['L_beta']
+    fractions = { k : v/total_loss for k, v in components.items() }
+    fkey = lambda key: f'{components[key]:+.4f} ({100.*fractions[key]:.1f}%)'
+    return (
+        'L_V+L_beta = {L:.4f}'
+        '\n  L_V                 = {L_V}'
+        '\n    L_V_attractive      = {L_V_attractive}'
+        '\n    L_V_repulsive       = {L_V_repulsive}'
+        '\n  L_beta              = {L_beta}'
+        '\n    L_beta_noise        = {L_beta_noise}'
+        '\n    L_beta_sig          = {L_beta_sig}'
+        '\n      L_beta_norms_term   = {L_beta_norms_term}'
+        '\n      L_beta_logbeta_term = {L_beta_logbeta_term}'
+        .format(L=total_loss,**{k : fkey(k) for k in components})
         )
 
 
@@ -656,6 +913,21 @@ def test_scatter_count():
     print(scatter_count(t))
     assert torch.allclose(torch.LongTensor([3, 2 ,2]), scatter_count(t))
 
+def scatter_counts_to_indices(input: torch.LongTensor) -> torch.LongTensor:
+    """
+    Converts counts to indices. This is the inverse operation of scatter_count
+    Example:
+    input:  [3, 2, 2]
+    output: [0, 0, 0, 1, 1, 2, 2]
+    """
+    return torch.repeat_interleave(torch.arange(input.size(0)), input).long()
+
+def test_scatter_counts_to_indices():
+    print(scatter_counts_to_indices(torch.LongTensor([3, 2, 2])))
+    assert torch.allclose(
+        scatter_counts_to_indices(torch.LongTensor([3, 2, 2])),
+        torch.LongTensor([0, 0, 0, 1, 1, 2, 2])
+        )
 
 def get_inter_event_norms_mask(batch: torch.LongTensor, nclusters_per_event: torch.LongTensor):
     """
@@ -718,8 +990,29 @@ def test_make_norm_mask():
         )
 
 
+def test_integration():
+    torch.manual_seed(1001)
+    global DEBUG
+    DEBUG = True
+    from dataset import FakeDataset
+    for data in DataLoader(FakeDataset(3), batch_size= 3): break
+    beta = torch.rand(data.x.size(0))
+    cluster_space_coords = torch.rand(data.x.size(0), 2)
+    components = calc_LV_Lbeta(
+        beta, cluster_space_coords,
+        data.y.long(), data.batch.long()
+        )
+    components = calc_LV_Lbeta_refactored(
+        beta, cluster_space_coords,
+        data.y.long(), data.batch.long()
+        )
+
+
+
 def main():
     pass
+    test_integration()
+    # test_scatter_counts_to_indices()
     # test_make_norm_mask()
     # test_get_clustering()
     # test_batch_cluster_indices()
