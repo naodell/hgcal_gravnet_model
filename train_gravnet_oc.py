@@ -52,7 +52,7 @@ def main():
             data.batch,
             # pred_cluster_properties, data.truth_cluster_props
             ])
-        out = objectcondensation.calc_LV_Lbeta(
+        out_oc = objectcondensation.calc_LV_Lbeta(
             pred_betas,
             pred_cluster_space_coords,
             data.y.long(),
@@ -60,9 +60,9 @@ def main():
             return_components=return_components
             )
         if return_components:
-            return out[2]
+            return out_oc
         else:
-            LV, Lbeta = out[:2]
+            LV, Lbeta = out_oc
             return LV + Lbeta + loss_offset
         # Lp = objectcondensation.calc_Lp(
         #     pred_betas,
