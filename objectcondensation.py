@@ -192,14 +192,10 @@ def calc_LV_Lbeta(
     # Get all the relevant norms: We want norms of any hit w.r.t. to 
     # objects they do *not* belong to, i.e. no noise clusters.
     # We do however want to keep norms of noise hits w.r.t. objects
-    norms_rep = norms * M_inv
-
     # Power-scale the norms: Gaussian scaling term instead of a cone
-    norms_rep = torch.exp(-4.*norms_rep**2)
+    # Mask out the norms of hits w.r.t. the cluster they belong to
+    norms_rep = torch.exp(-4.*norms**2) * M_inv
     
-    # Now mask out the norms of hits w.r.t. the cluster they belong to
-    norms_rep *= M_inv
-
     # (n_sig_hits, 1) * (1, n_objects) * (n_sig_hits, n_objects)
     V_repulsive = q.unsqueeze(1) * q_alpha.unsqueeze(0) * norms_rep
     # No need to apply a V = max(0, V); by construction V>=0
@@ -267,7 +263,7 @@ def calc_LV_Lbeta(
             )
     if DEBUG:
         debug(formatted_loss_components_string(components))
-    return components if return_components else L_V/batch_size, L_beta/batch_size
+    return components if return_components else (L_V/batch_size, L_beta/batch_size)
 
 
 def formatted_loss_components_string(components):
@@ -559,7 +555,7 @@ def scatter_counts_to_indices(input: torch.LongTensor) -> torch.LongTensor:
     input:  [3, 2, 2]
     output: [0, 0, 0, 1, 1, 2, 2]
     """
-    return torch.repeat_interleave(torch.arange(input.size(0)), input).long()
+    return torch.repeat_interleave(torch.arange(input.size(0), device=input.device), input).long()
 
 def test_scatter_counts_to_indices():
     print(scatter_counts_to_indices(torch.LongTensor([3, 2, 2])))

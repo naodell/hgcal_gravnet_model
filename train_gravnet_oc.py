@@ -111,10 +111,10 @@ def main():
         for key in loss_components:
             loss_components[key] /= N_test
         # Compute total loss and do printout
-        total_loss = loss_components['V']+loss_components['beta']
         print('test ' + objectcondensation.formatted_loss_components_string(loss_components))
-        print(f'Returning {loss_offset + total_loss}')
-        return loss_offset + total_loss
+        test_loss = loss_offset + loss_components['L_V']+loss_components['L_beta']
+        print(f'Returning {test_loss}')
+        return test_loss
 
     ckpt_dir = strftime('ckpts_gravnet_%b%d_%H%M')
     def write_checkpoint(checkpoint_number=None, best=False):
