@@ -255,6 +255,7 @@ class GravnetModel(nn.Module):
 
     def forward(self, x: Tensor, batch: Tensor) -> Tensor:
         device = x.device
+
         # print('forward called on device', device)
         x = self.batchnorm1(x)
         x = global_exchange(x, batch)
@@ -287,7 +288,6 @@ def test_model_sizes():
         x = model(data.x, data.batch)
         print(x.size())
         return
-
 
 def main():
     pass

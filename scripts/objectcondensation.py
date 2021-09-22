@@ -63,14 +63,13 @@ def calc_LV_Lbeta(
 
     # ________________________________
     # Calculate a bunch of needed counts and indices locally
-
     # cluster_index: unique index over events
     # E.g. cluster_index_per_event=[ 0, 0, 1, 2, 0, 0, 1], batch=[0, 0, 0, 0, 1, 1, 1]
     #      -> cluster_index=[ 0, 0, 1, 2, 3, 3, 4 ]
     cluster_index, n_clusters_per_event = batch_cluster_indices(cluster_index_per_event, batch)
     n_clusters = n_clusters_per_event.sum()
     n_hits, cluster_space_dim = cluster_space_coords.size()
-    batch_size = batch.max()+1
+    batch_size = batch.max() + 1
     n_hits_per_event = scatter_count(batch)
 
     # Index of cluster -> event (n_clusters,)
@@ -345,7 +344,7 @@ def calc_Lp(
     xi_sum = xi.sum()
     for L in [ L_energy, L_time, L_position ]:
         Lp += 1./xi_sum * (xi * L).sum()
-    debug(f'Lp={Lp}')
+    debug(f'Lp = {Lp}')
     return Lp
 
 
@@ -371,6 +370,7 @@ def batch_cluster_indices(cluster_id: torch.Tensor, batch: torch.Tensor):
     offset_values = torch.cat((torch.zeros(1, device=device), offset_values_nozero))
     # Fill it per hit
     offset = torch.gather(offset_values, 0, batch).long()
+
     return offset + cluster_id, n_clusters_per_event
 
 
@@ -426,10 +426,13 @@ def test_calc_Lp():
 def get_clustering_np(betas: np.array, X: np.array, tbeta=.1, td=2.):
     n_points = betas.shape[0]
     select_condpoints = betas > tbeta
+
     # Get indices passing the threshold
     indices_condpoints = np.nonzero(select_condpoints)[0]
+
     # Order them by decreasing beta value
     indices_condpoints = indices_condpoints[np.argsort(-betas[select_condpoints])]
+
     # Assign points to condensation points
     # Only assign previously unassigned points (no overwriting)
     # Points unassigned at the end are bkg (-1)
@@ -440,16 +443,20 @@ def get_clustering_np(betas: np.array, X: np.array, tbeta=.1, td=2.):
         assigned_to_this_condpoint = unassigned[d < td]
         clustering[assigned_to_this_condpoint] = index_condpoint
         unassigned = unassigned[~(d < td)]
+
     return clustering
 
 
 def get_clustering(betas: torch.Tensor, X: torch.Tensor, tbeta=.1, td=2.):
     n_points = betas.size(0)
     select_condpoints = betas > tbeta
+
     # Get indices passing the threshold
     indices_condpoints = select_condpoints.nonzero()
+
     # Order them by decreasing beta value
     indices_condpoints = indices_condpoints[(-betas[select_condpoints]).argsort()]
+
     # Assign points to condensation points
     # Only assign previously unassigned points (no overwriting)
     # Points unassigned at the end are bkg (-1)
@@ -460,6 +467,7 @@ def get_clustering(betas: torch.Tensor, X: torch.Tensor, tbeta=.1, td=2.):
         assigned_to_this_condpoint = unassigned[d < td]
         clustering[assigned_to_this_condpoint] = index_condpoint
         unassigned = unassigned[~(d < td)]
+
     return clustering
 
 

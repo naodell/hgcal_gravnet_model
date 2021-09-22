@@ -16,7 +16,8 @@ def main():
     parser.add_argument('-d', '--dry', action='store_true', help='Turn off checkpoint saving and run limited number of events')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print more output')
     args = parser.parse_args()
-    if args.verbose: objectcondensation.DEBUG = True
+    if args.verbose: 
+        objectcondensation.DEBUG = True
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print('Using device', device)

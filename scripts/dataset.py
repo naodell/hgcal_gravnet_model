@@ -26,8 +26,10 @@ class FakeDataset(Dataset):
             n_clusters = min(np.random.randint(1, 6), n_hits)
             x = np.random.rand(n_hits, 5)
             y = (np.random.rand(n_hits) * n_clusters).astype(np.int8)
+
             # Also make a cluster 'truth': energy, boundary_x, boundary_y, pid (4)
             y_cluster = np.random.rand(n_clusters, 4)
+
             # pid (last column) should be an integer; do 3 particle classes now
             y_cluster[:,-1] = np.floor(y_cluster[:,-1] * 3)
             self.cache[i] = Data(
@@ -136,8 +138,11 @@ class TauDataset(Dataset):
             # Negative endcap: Flip z-dependent coordinates
             x[:,1] *= -1 # eta
             x[:,7] *= -1 # z
+
         cluster_index = incremental_cluster_index_np(d['recHitTruthClusterIdx'].squeeze())
-        if np.all(cluster_index == 0): print('WARNING: No objects in', self.npzs[i])
+        if np.all(cluster_index == 0):
+            print('WARNING: No objects in', self.npzs[i])
+
         truth_cluster_props = np.hstack((
             d['recHitTruthEnergy'],
             d['recHitTruthPosition'],
@@ -146,6 +151,7 @@ class TauDataset(Dataset):
             ))
         assert truth_cluster_props.shape == (x.shape[0], 5)
         order = cluster_index.argsort()
+
         return Data(
             x = torch.from_numpy(x[order]).type(torch.float),
             y = torch.from_numpy(cluster_index[order]).type(torch.int),
@@ -155,6 +161,7 @@ class TauDataset(Dataset):
 
     def __len__(self):
         return len(self.npzs)
+
     def len(self):
         return len(self.npzs)
 
