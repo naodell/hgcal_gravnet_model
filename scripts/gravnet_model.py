@@ -29,9 +29,9 @@ def setup_logger(name="hgcalmb", fmt=None):
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
     return logger
+
 logger = setup_logger() 
 debug = logger.debug
-
 
 class FakeDataset(Dataset):
     """
@@ -129,7 +129,7 @@ def global_exchange(x: Tensor, batch: Tensor) -> Tensor:
         scatter(x, batch, dim=0, reduce='min'),
         scatter(x, batch, dim=0, reduce='max')
         ), dim=-1)
-    assert meanminmax.size() == (batch_size, 3*n_features)
+    #assert meanminmax.size() == (batch_size, 3*n_features)
 
     # (batch_size x 3*n_features) --> (n_hits x 3*n_features),
     # by copying the minmeanmax per batch by the counts per batch.
@@ -142,13 +142,13 @@ def global_exchange(x: Tensor, batch: Tensor) -> Tensor:
             ],
         dim=0
         )
-    assert meanminmax.size() == (n_hits, 3*n_features)
+    #assert meanminmax.size() == (n_hits, 3*n_features)
 
     # Add as columns to feature tensor
     out = torch.cat((meanminmax, x), dim=-1)
-    assert out.size() == (n_hits, 4*n_features)
+    #assert out.size() == (n_hits, 4*n_features)
 
-    assert all(t.device == device for t in [batch_numbers, batch_counts, meanminmax, out, x, batch])
+    #assert all(t.device == device for t in [batch_numbers, batch_counts, meanminmax, out, x, batch])
     return out
 
 
@@ -260,19 +260,19 @@ class GravnetModel(nn.Module):
         x = self.batchnorm1(x)
         x = global_exchange(x, batch)
         x = self.input(x)
-        assert x.device == device
+        #assert x.device == device
 
         x_gravnet_per_block = [] # To store intermediate outputs
         for gravnet_block in self.gravnet_blocks:
             x = gravnet_block(x, batch)
             x_gravnet_per_block.append(x)
         x = torch.cat(x_gravnet_per_block, dim=-1)
-        assert x.size() == (x.size(0), 4*96)
-        assert x.device == device
+        #assert x.size() == (x.size(0), 4*96)
+        #assert x.device == device
 
         x = self.postgn_dense(x)
         x = self.output(x)
-        assert x.device == device
+        #assert x.device == device
         return x
 
 
