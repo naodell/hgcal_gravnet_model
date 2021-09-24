@@ -43,6 +43,7 @@ def main():
         keep = .005
         print(f'Keeping only {100.*keep:.1f}% of events for debugging')
         dataset, _ = dataset.split(keep)
+
     train_dataset, test_dataset = dataset.split(.8)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle)
