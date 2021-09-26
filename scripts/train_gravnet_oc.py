@@ -6,15 +6,102 @@ import tqdm
 import torch
 import torch.nn as nn
 from torch_geometric.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 import objectcondensation
 from gravnet_model import GravnetModel, debug
 from dataset import TauDataset
 from lrscheduler import CyclicLRWithRestarts
+from scripts.helper_funcs import convert_parallel_model
 
 torch.manual_seed(1009)
 
+def loss_fn(out, data, s_c=1., return_components=False):
+    device = out.device
+    pred_betas = torch.sigmoid(out[:,0])
+    pred_cluster_space_coords = out[:,1:4]
+    # pred_cluster_properties = out[:,3:]
+    assert all(t.device == device for t in [
+        pred_betas, pred_cluster_space_coords, data.y,
+        data.batch,
+        # pred_cluster_properties, data.truth_cluster_props
+        ])
+    out_oc = objectcondensation.calc_LV_Lbeta(
+        pred_betas,
+        pred_cluster_space_coords,
+        data.y.long(),
+        data.batch,
+        return_components=return_components
+        )
+    if return_components:
+        return out_oc
+    else:
+        LV, Lbeta = out_oc
+        return LV + Lbeta + 1
+    # Lp = objectcondensation.calc_Lp(
+    #     pred_betas,
+    #     data.y.long(),
+    #     pred_cluster_properties,
+    #     data.truth_cluster_props
+    #     )
+    # return Lp + s_c*(LV + Lbeta)
+
+def train(model, data_loader, device, epoch):
+    print('Training epoch', epoch)
+    model.train()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
+    # scheduler.step()
+    pbar = tqdm.tqdm(data_loader, total=len(data_loader))
+    pbar.set_postfix({'loss': '?'})
+    for i, data in enumerate(pbar):
+        data = data.to(device)
+        optimizer.zero_grad()
+        result = model(data.x, data.batch)
+        loss = loss_fn(result, data)
+        loss.backward()
+        optimizer.step()
+        # scheduler.batch_step()
+        pbar.set_postfix({'loss': float(loss)})
+        # if i == 2: raise Exception
+
+def test(model, data_loader, device, epoch):
+    N_test = len(data_loader)
+    loss_components = {}
+
+    def update(components):
+        for key, value in components.items():
+            if not key in loss_components: loss_components[key] = 0.
+            loss_components[key] += value
+
+    with torch.no_grad():
+        model.eval()
+        for data in tqdm.tqdm(data_loader, total=len(data_loader)):
+            data = data.to(device)
+            result = model(data.x, data.batch)
+            update(loss_fn(result, data, return_components=True))
+
+    # Divide by number of entries
+    for key in loss_components:
+        loss_components[key] /= N_test
+
+    # Compute total loss and do printout
+    print('test ' + objectcondensation.formatted_loss_components_string(loss_components))
+    test_loss = 1 + loss_components['L_V']+loss_components['L_beta']
+    print(f'Returning {test_loss}')
+    return test_loss
+
+def write_checkpoint(checkpoint_number=None, best=False):
+    timestamp = strftime('%b%d_%H%M%S')
+    ckpt_filename = 'ckpt_best.pth.tar' if best else f'ckpt_{timestamp}_{checkpoint_number}.pth.tar'
+    ckpt = osp.join('checkpoints', ckpt_filename)
+    if best: 
+        print('Saving epoch {0} as new best'.format(checkpoint_number))
+
+    #os.makedirs(ckpt_dir, exist_ok=True)
+    torch.save(dict(model=model.state_dict()), ckpt)
+
 def main():
+
     parser = argparse.ArgumentParser()
     parser.add_argument('-d', '--dry', action='store_true', help='Turn off checkpoint saving and run limited number of events')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print more output')
@@ -26,8 +113,8 @@ def main():
     if args.verbose: 
         objectcondensation.DEBUG = True
 
-    n_epochs = 50
-    batch_size = 12
+    n_epochs = 100
+    batch_size = 16
 
     shuffle = True
     dataset = TauDataset('data/taus')
@@ -43,6 +130,7 @@ def main():
         'data/taus/5_nanoML_51.npz',
         'data/taus/86_nanoML_97.npz',
         ])
+
     if args.dry:
         keep = .005
         print(f'Keeping only {100.*keep:.1f}% of events for debugging')
@@ -62,7 +150,8 @@ def main():
     n_gpus = torch.cuda.device_count()
     if n_gpus > 1:
         device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
-        print(f'Using {n_gpus} GPUS')
+        print(f'Using {n_gpus - 1} GPUS')
+        # this is setup for running on schmittgpu machine and leaves one GPU open
         model = nn.DataParallel(model, device_ids=[1, 2, 3], output_device=1)
     else:
         device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
@@ -71,104 +160,21 @@ def main():
     model.to(device)
 
     epoch_size = len(train_loader.dataset)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
     # scheduler = CyclicLRWithRestarts(optimizer, batch_size, epoch_size, restart_period=400, t_mult=1.1, policy="cosine")
-
-    loss_offset = 1. # To prevent a negative loss from ever occuring
-
-    def loss_fn(out, data, s_c=1., return_components=False):
-        device = out.device
-        pred_betas = torch.sigmoid(out[:,0])
-        pred_cluster_space_coords = out[:,1:4]
-        # pred_cluster_properties = out[:,3:]
-        assert all(t.device == device for t in [
-            pred_betas, pred_cluster_space_coords, data.y,
-            data.batch,
-            # pred_cluster_properties, data.truth_cluster_props
-            ])
-        out_oc = objectcondensation.calc_LV_Lbeta(
-            pred_betas,
-            pred_cluster_space_coords,
-            data.y.long(),
-            data.batch,
-            return_components=return_components
-            )
-        if return_components:
-            return out_oc
-        else:
-            LV, Lbeta = out_oc
-            return LV + Lbeta + loss_offset
-        # Lp = objectcondensation.calc_Lp(
-        #     pred_betas,
-        #     data.y.long(),
-        #     pred_cluster_properties,
-        #     data.truth_cluster_props
-        #     )
-        # return Lp + s_c*(LV + Lbeta)
-
-    def train(epoch):
-        print('Training epoch', epoch)
-        model.train()
-        # scheduler.step()
-        try:
-            pbar = tqdm.tqdm(train_loader, total=len(train_loader))
-            pbar.set_postfix({'loss': '?'})
-            for i, data in enumerate(pbar):
-                data = data.to(device)
-                optimizer.zero_grad()
-                result = model(data.x, data.batch)
-                loss = loss_fn(result, data)
-                loss.backward()
-                optimizer.step()
-                # scheduler.batch_step()
-                pbar.set_postfix({'loss': float(loss)})
-                # if i == 2: raise Exception
-        except Exception:
-            print('Exception encountered:', data, ', npzs:')
-            print('  ' + '\n  '.join([train_dataset.npzs[int(i)] for i in data.inpz]))
-            raise
-
-    def test(epoch):
-        N_test = len(test_loader)
-        loss_components = {}
-        def update(components):
-            for key, value in components.items():
-                if not key in loss_components: loss_components[key] = 0.
-                loss_components[key] += value
-        with torch.no_grad():
-            model.eval()
-            for data in tqdm.tqdm(test_loader, total=len(test_loader)):
-                data = data.to(device)
-                result = model(data.x, data.batch)
-                update(loss_fn(result, data, return_components=True))
-        # Divide by number of entries
-        for key in loss_components:
-            loss_components[key] /= N_test
-        # Compute total loss and do printout
-        print('test ' + objectcondensation.formatted_loss_components_string(loss_components))
-        test_loss = loss_offset + loss_components['L_V']+loss_components['L_beta']
-        print(f'Returning {test_loss}')
-        return test_loss
-
-    def write_checkpoint(checkpoint_number=None, best=False):
-        timestamp = strftime('%b%d_%H%M%S')
-        ckpt_filename = 'ckpt_best.pth.tar' if best else f'ckpt_{timestamp}_{checkpoint_number}.pth.tar'
-        ckpt = osp.join('checkpoints', ckpt_filename)
-        if best: 
-            print('Saving epoch {0} as new best'.format(checkpoint_number))
-
-        if not args.dry:
-            #os.makedirs(ckpt_dir, exist_ok=True)
-            torch.save(dict(model=model.state_dict()), ckpt)
 
     min_loss = 1e9
     for i_epoch in range(n_epochs):
-        train(i_epoch)
-        write_checkpoint(i_epoch)
-        test_loss = test(i_epoch)
+        train(model, train_loader, device, i_epoch)
+        test_loss = test(model, test_loader, device, i_epoch)
+
+        if not args.dry: 
+            write_checkpoint(i_epoch)
+
         if test_loss < min_loss:
             min_loss = test_loss
-            write_checkpoint(i_epoch, best=True)
+            if not args.dry: 
+                write_checkpoint(i_epoch, best=True)
+
 
 def debug():
     objectcondensation.DEBUG = True
@@ -233,5 +239,6 @@ def run_profile():
 
 if __name__ == '__main__':
     main()
-    # debug()
-    # run_profile()
+    #debug()
+    #run_profile()
+

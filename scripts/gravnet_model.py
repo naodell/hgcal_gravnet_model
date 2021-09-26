@@ -181,6 +181,7 @@ class GravNetBlock(nn.Module):
         space_dimensions: int = 4, propagate_dimensions: int = 22, k: int = 40
         ):
         super(GravNetBlock, self).__init__()
+
         # Includes all layers up to the global_exchange
         self.gravnet_layer = GravNetConv(
                 in_channels, out_channels,
