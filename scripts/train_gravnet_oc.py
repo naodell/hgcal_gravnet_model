@@ -13,6 +13,7 @@ from gravnet_model import GravnetModel, debug
 from dataset import TauDataset
 from lrscheduler import CyclicLRWithRestarts
 from scripts.helper_funcs import convert_parallel_model
+from scripts.nadam import Nadam
 
 torch.manual_seed(1009)
 
@@ -38,6 +39,7 @@ def loss_fn(out, data, s_c=1., return_components=False):
     else:
         LV, Lbeta = out_oc
         return LV + Lbeta + 1
+
     # Lp = objectcondensation.calc_Lp(
     #     pred_betas,
     #     data.y.long(),
@@ -49,7 +51,9 @@ def loss_fn(out, data, s_c=1., return_components=False):
 def train(model, data_loader, device, epoch):
     print('Training epoch', epoch)
     model.train()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
+    optimizer = Nadam(model.parameters(), lr=1e-5, weight_decay=1e-4)
+    #optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
+
     # scheduler.step()
     pbar = tqdm.tqdm(data_loader, total=len(data_loader))
     pbar.set_postfix({'loss': '?'})
@@ -90,9 +94,9 @@ def test(model, data_loader, device, epoch):
     print(f'Returning {test_loss}')
     return test_loss
 
-def write_checkpoint(checkpoint_number=None, best=False):
+def write_checkpoint(model, checkpoint_number=None, best=False):
     timestamp = strftime('%b%d_%H%M%S')
-    ckpt_filename = 'ckpt_best.pth.tar' if best else f'ckpt_{timestamp}_{checkpoint_number}.pth.tar'
+    ckpt_filename = 'ckpt_best_new.pth.tar' if best else f'ckpt_{timestamp}_{checkpoint_number}.pth.tar'
     ckpt = osp.join('checkpoints', ckpt_filename)
     if best: 
         print('Saving epoch {0} as new best'.format(checkpoint_number))
@@ -114,7 +118,7 @@ def main():
         objectcondensation.DEBUG = True
 
     n_epochs = 100
-    batch_size = 16
+    batch_size = 4
 
     shuffle = True
     dataset = TauDataset('data/taus')
@@ -168,12 +172,12 @@ def main():
         test_loss = test(model, test_loader, device, i_epoch)
 
         if not args.dry: 
-            write_checkpoint(i_epoch)
+            write_checkpoint(model, i_epoch)
 
         if test_loss < min_loss:
             min_loss = test_loss
             if not args.dry: 
-                write_checkpoint(i_epoch, best=True)
+                write_checkpoint(model, i_epoch, best=True)
 
 
 def debug():

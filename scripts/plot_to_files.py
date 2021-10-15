@@ -35,7 +35,7 @@ def main():
     model.load_state_dict(torch.load(ckpt, map_location=torch.device('cpu'))['model'])
 
     tbeta = .2
-    td = .1
+    td = 0.5
     nmax = 10
 
     desc_str = f'tbeta{tbeta:.1f}_td{td:.1f}'.replace('.', 'p')

@@ -208,6 +208,7 @@ class GravNetBlock(nn.Module):
         x = global_exchange(x, batch)
         x = self.output(x)
         assert x.size(1) == 96
+
         return x
 
 
