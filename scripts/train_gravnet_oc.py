@@ -51,8 +51,12 @@ def loss_fn(out, data, s_c=1., return_components=False):
 def train(model, data_loader, device, epoch):
     print('Training epoch', epoch)
     model.train()
-    optimizer = Nadam(model.parameters(), lr=1e-5, weight_decay=1e-4)
-    #optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    optimizer = Nadam(model.parameters(), 
+            lr=1e-5, 
+            weight_decay=1e-4,
+            schedule_decay=4e-3
+            )
 
     # scheduler.step()
     pbar = tqdm.tqdm(data_loader, total=len(data_loader))
@@ -103,82 +107,6 @@ def write_checkpoint(model, checkpoint_number=None, best=False):
 
     #os.makedirs(ckpt_dir, exist_ok=True)
     torch.save(dict(model=model.state_dict()), ckpt)
-
-def main():
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-d', '--dry', action='store_true', help='Turn off checkpoint saving and run limited number of events')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Print more output')
-    parser.add_argument('-c', '--checkpoint', action='store_true', help = 'Load checkpoint file with model weights.')
-            #default = None,
-            #type = str
-            #)
-    args = parser.parse_args()
-    if args.verbose: 
-        objectcondensation.DEBUG = True
-
-    n_epochs = 100
-    batch_size = 4
-
-    shuffle = True
-    dataset = TauDataset('data/taus')
-    dataset.blacklist([ # Remove a bunch of bad events
-        'data/taus/110_nanoML_98.npz',
-        'data/taus/113_nanoML_13.npz',
-        'data/taus/124_nanoML_77.npz',
-        'data/taus/128_nanoML_70.npz',
-        'data/taus/149_nanoML_90.npz',
-        'data/taus/153_nanoML_22.npz',
-        'data/taus/26_nanoML_93.npz',
-        'data/taus/32_nanoML_45.npz',
-        'data/taus/5_nanoML_51.npz',
-        'data/taus/86_nanoML_97.npz',
-        ])
-
-    if args.dry:
-        keep = .005
-        print(f'Keeping only {100.*keep:.1f}% of events for debugging')
-        dataset, _ = dataset.split(keep)
-
-    train_dataset, test_dataset = dataset.split(.8)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle)
-
-    model = GravnetModel(input_dim=9, output_dim=4)
-    if args.checkpoint:
-        print('loading from checkpoint...')
-        state_dict = torch.load('checkpoints/ckpt_best.pth.tar')['model']
-        state_dict = convert_parallel_model(state_dict)
-        model.load_state_dict(state_dict)
-
-    n_gpus = torch.cuda.device_count()
-    if n_gpus > 1:
-        device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
-        print(f'Using {n_gpus - 1} GPUS')
-        # this is setup for running on schmittgpu machine and leaves one GPU open
-        model = nn.DataParallel(model, device_ids=[1, 2, 3], output_device=1)
-    else:
-        device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
-        print('Using device', device)
-
-    model.to(device)
-
-    epoch_size = len(train_loader.dataset)
-    # scheduler = CyclicLRWithRestarts(optimizer, batch_size, epoch_size, restart_period=400, t_mult=1.1, policy="cosine")
-
-    min_loss = 1e9
-    for i_epoch in range(n_epochs):
-        train(model, train_loader, device, i_epoch)
-        test_loss = test(model, test_loader, device, i_epoch)
-
-        if not args.dry: 
-            write_checkpoint(model, i_epoch)
-
-        if test_loss < min_loss:
-            min_loss = test_loss
-            if not args.dry: 
-                write_checkpoint(model, i_epoch, best=True)
-
 
 def debug():
     objectcondensation.DEBUG = True
@@ -242,7 +170,81 @@ def run_profile():
     # cuda_memory_usage, self_cpu_memory_usage, self_cuda_memory_usage, count
 
 if __name__ == '__main__':
-    main()
     #debug()
     #run_profile()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-d', '--dry', action='store_true', help='Turn off checkpoint saving and run limited number of events')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Print more output')
+    parser.add_argument('-c', '--checkpoint', action='store_true', help = 'Load checkpoint file with model weights.')
+            #default = None,
+            #type = str
+            #)
+    args = parser.parse_args()
+    if args.verbose: 
+        objectcondensation.DEBUG = True
+
+    n_epochs = 100
+    batch_size = 4
+    torch.manual_seed(21)
+
+    shuffle = True
+    dataset = TauDataset('data/taus')
+    dataset.blacklist([ # Remove a bunch of bad events
+        'data/taus/110_nanoML_98.npz',
+        'data/taus/113_nanoML_13.npz',
+        'data/taus/124_nanoML_77.npz',
+        'data/taus/128_nanoML_70.npz',
+        'data/taus/149_nanoML_90.npz',
+        'data/taus/153_nanoML_22.npz',
+        'data/taus/26_nanoML_93.npz',
+        'data/taus/32_nanoML_45.npz',
+        'data/taus/5_nanoML_51.npz',
+        'data/taus/86_nanoML_97.npz',
+        ])
+
+    if args.dry:
+        keep = .005
+        print(f'Keeping only {100.*keep:.1f}% of events for debugging')
+        dataset, _ = dataset.split(keep)
+
+    train_dataset, test_dataset = dataset.split(.8)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle)
+
+    model = GravnetModel(input_dim=9, output_dim=4)
+    if args.checkpoint:
+        print('loading from checkpoint...')
+        state_dict = torch.load('checkpoints/ckpt_best.pth.tar')['model']
+        state_dict = convert_parallel_model(state_dict)
+        model.load_state_dict(state_dict)
+
+    n_gpus = torch.cuda.device_count()
+    if n_gpus > 1:
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        print(f'Using {n_gpus - 1} GPUS')
+        # this is setup for running on schmittgpu machine and leaves one GPU open
+        model = nn.DataParallel(model, device_ids=[0, 2, 3], output_device=0)
+    else:
+        device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+        print('Using device', device)
+
+    model.to(device)
+
+    epoch_size = len(train_loader.dataset)
+    # scheduler = CyclicLRWithRestarts(optimizer, batch_size, epoch_size, restart_period=400, t_mult=1.1, policy="cosine")
+
+    min_loss = 1e9
+    for i_epoch in range(n_epochs):
+        train(model, train_loader, device, i_epoch)
+        test_loss = test(model, test_loader, device, i_epoch)
+
+        if not args.dry: 
+            write_checkpoint(model, i_epoch)
+
+        if test_loss < min_loss:
+            min_loss = test_loss
+            if not args.dry: 
+                write_checkpoint(model, i_epoch, best=True)
+
 
