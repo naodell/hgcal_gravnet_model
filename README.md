@@ -1,7 +1,7 @@
  1. Assuming you have CUDA installed, check the version with nvidia-smi. Then
 install pytorch with a CUDA version <= whatever nvidia-smi reports (i.e. if
 your CUDA version is 11.0, install torch for CUDA 10.4, not 11.1). See the
-install instructions (here)[ https://pytorch.org/] for more details.  Create and setup a new conda environment:
+install instructions [https://pytorch.org/](here) for more details.  Create and setup a new conda environment:
 ```
 	conda create -n hgcal-ml python=3.9
 	conda activate hgcal-ml
