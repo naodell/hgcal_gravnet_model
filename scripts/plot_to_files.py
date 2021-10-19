@@ -26,7 +26,7 @@ def pred_clusterspace_plot(event, out, tbeta=.1, td=1.):
     clustering = oc.get_clustering_np(betas, cluster_space_coords, tbeta=tbeta, td=td)
     return plotting.get_plotly_clusterspace(event, out[:,1:], clustering)
 
-def main():
+def make_plots():
     _, test_dataset = TauDataset('local_data/npzs_all').split(.8)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
@@ -64,4 +64,4 @@ def main():
             
 
 if __name__ == "__main__":
-    main()
+    make_plots()
