@@ -17,7 +17,7 @@ from dataset import TauDataset
 from lrscheduler import CyclicLRWithRestarts
 
 from scripts.helper_funcs import convert_parallel_model
-#from scripts.plot_to_files import
+from scripts.plot_to_files import
 from scripts.nadam import Nadam
 
 def loss_fn(out, data, s_c=1., return_components=False):
@@ -50,28 +50,6 @@ def loss_fn(out, data, s_c=1., return_components=False):
     #     data.truth_cluster_props
     #     )
     # return Lp + s_c*(LV + Lbeta)
-
-def train(model, data_loader, optimizer, device, epoch, tb_writer=None):
-    print('Training epoch', epoch)
-    model.train()
-
-    # scheduler.step()
-    pbar = tqdm.tqdm(data_loader, total=len(data_loader))
-    pbar.set_postfix({'loss': '?'})
-    n_data = len(data_loader)
-    for i, data in enumerate(pbar):
-        data = data.to(device)
-        optimizer.zero_grad()
-        result = model(data.x, data.batch)
-        loss = loss_fn(result, data)
-        loss.backward()
-        optimizer.step()
-        # scheduler.batch_step()
-        pbar.set_postfix({'loss': float(loss)})
-        tb_writer.add_scalar('train loss', loss, i + n_data*epoch)
-        # if i == 2: raise Exception
-
-        
 
 def test(model, data_loader, device, epoch):
     N_test = len(data_loader)
@@ -109,86 +87,28 @@ def write_checkpoint(model, checkpoint_number=None, best=False):
     #os.makedirs(ckpt_dir, exist_ok=True)
     torch.save(dict(model=model.state_dict()), ckpt)
 
-def debug():
-    objectcondensation.DEBUG = True
-    dataset = TauDataset('data/taus')
-    dataset.npzs = [
-        # 'data/taus/49_nanoML_84.npz',
-        # 'data/taus/37_nanoML_4.npz',
-        'data/taus/26_nanoML_93.npz',
-        # 'data/taus/142_nanoML_75.npz',
-        ]
-    for data in DataLoader(dataset, batch_size=len(dataset), shuffle=False): break
-    print(data.y.sum())
-    model = GravnetModel(input_dim=9, output_dim=4)
-    with torch.no_grad():
-        model.eval()
-        out = model(data.x, data.batch)
-    pred_betas = torch.sigmoid(out[:,0])
-    pred_cluster_space_coords = out[:,1:4]
-    out_oc = objectcondensation.calc_LV_Lbeta(
-        pred_betas,
-        pred_cluster_space_coords,
-        data.y.long(),
-        data.batch.long()
-        )
+def distributed_training(rank, world_size, args):
 
-def run_profile():
-    from torch.profiler import profile, record_function, ProfilerActivity
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print('Using device', device)
-
-    batch_size = 2
-    n_batches = 2
-    shuffle = True
-    dataset = TauDataset('data/taus')
-    dataset.npzs = dataset.npzs[:batch_size*n_batches]
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
-    print(f'Running profiling for {len(dataset)} events, batch_size={batch_size}, {len(loader)} batches')
-
-    model = GravnetModel(input_dim=9, output_dim=8).to(device)
-    epoch_size = len(loader.dataset)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-7, weight_decay=1e-4)
-
-    print('Start limited training loop')
-    model.train()
-    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
-        with record_function("model_inference"):
-            pbar = tqdm.tqdm(loader, total=len(loader))
-            pbar.set_postfix({'loss': '?'})
-            for i, data in enumerate(pbar):
-                data = data.to(device)
-                optimizer.zero_grad()
-                result = model(data.x, data.batch)
-                loss = loss_fn(result, data)
-                print(f'loss={float(loss)}')
-                loss.backward()
-                optimizer.step()
-                pbar.set_postfix({'loss': float(loss)})
-    print(prof.key_averages().table(sort_by="cpu_time", row_limit=10))
-    # Other valid keys:
-    # cpu_time, cuda_time, cpu_time_total, cuda_time_total, cpu_memory_usage,
-    # cuda_memory_usage, self_cpu_memory_usage, self_cuda_memory_usage, count
-
-if __name__ == '__main__':
-    #debug()
-    #run_profile()
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-d', '--dry', action='store_true', help='Turn off checkpoint saving and run limited number of events')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Print more output')
-    parser.add_argument('-c', '--checkpoint', action='store_true', help = 'Load checkpoint file with model weights.')
-            #default = None,
-            #type = str
-            #)
-    args = parser.parse_args()
-    if args.verbose: 
-        objectcondensation.DEBUG = True
-
-    n_epochs = 100
-    batch_size = 4
+    # creates default process (what's rank, world_size?)
+    dist.init_process_group('gloo', rank=rank world_size=world_size)
     torch.manual_seed(42)
 
+    # initialize model
+    model = GravnetModel(input_dim=9, output_dim=4)
+    if args.checkpoint:
+        print('loading from checkpoint...')
+        state_dict = torch.load('checkpoints/ckpt_best.pth.tar')['model']
+        state_dict = convert_parallel_model(state_dict)
+        model.load_state_dict(state_dict)
+
+    torch.cuda.set_device(rank)
+    model.cuda(rank)
+    ddp_model = DDP(model, device_ids=[rank])
+
+    # initialize optimizer
+    optimizer = Nadam(model.parameters(), lr=1e-5, weight_decay=1e-4, schedule_decay=4e-3)
+
+    # get the data
     shuffle = True
     dataset = TauDataset('data/taus')
     dataset.blacklist([ # Remove a bunch of bad events
@@ -210,8 +130,81 @@ if __name__ == '__main__':
         dataset, _ = dataset.split(keep)
 
     train_dataset, test_dataset = dataset.split(.8)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle)
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    train_loader = DataLoader(train_dataset, 
+            batch_size=batch_size, 
+            shuffle=False, 
+            num_workers=0, 
+            pin_memory=True,
+            sampler=train_sampler
+           )
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=shuffle)
+
+    min_loss = 1e9
+    for i_epoch in range(n_epochs):
+
+        # run training loop
+        print('Training epoch', epoch)
+        model.train()
+
+        # scheduler.step()
+        pbar = tqdm.tqdm(data_loader, total=len(data_loader))
+        pbar.set_postfix({'loss': '?'})
+        n_data = len(data_loader)
+        for i, data in enumerate(pbar):
+            data = data.cuda(non_blocking=True)
+
+            # forward pass
+            result = model(data.x, data.batch)
+            loss = loss_fn(result, data)
+
+            # back propagate
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            # scheduler.batch_step()
+            pbar.set_postfix({'loss': float(loss)})
+            tb_writer.add_scalar('train loss', loss, i + n_data*epoch)
+
+        test_loss = test(ddp_model, test_loader, rank, i_epoch)
+        tb_writer.add_scalar('test loss', test_loss, i_epoch)
+
+        if not args.dry: 
+            write_checkpoint(ddp_model, i_epoch)
+
+        if test_loss < min_loss:
+            min_loss = test_loss
+            if not args.dry: 
+                write_checkpoint(ddp_model, i_epoch, best=True)
+
+    tb_writer.flush()
+    dist.destroy_process_group()
+
+if __name__ == '__main__':
+    #debug()
+    #run_profile()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-d', '--dry', action='store_true', help='Turn off checkpoint saving and run limited number of events')
+    parser.add_argument('-v', '--verbose', action='store_true', help='Print more output')
+    parser.add_argument('-c', '--checkpoint', action='store_true', help = 'Load checkpoint file with model weights.')
+            #default = None,
+            #type = str
+            #)
+    args = parser.parse_args()
+    if args.verbose: 
+        objectcondensation.DEBUG = True
+
+    world_size = 3
+    n_epochs = 100
+    batch_size = 4
+    torch.manual_seed(101)
+
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '8888'
+    mp.spawn(distributed_training, nprocs=3, args=(world_size, args))
+
 
     model = GravnetModel(input_dim=9, output_dim=4)
     if args.checkpoint:
@@ -222,7 +215,6 @@ if __name__ == '__main__':
 
     n_gpus = torch.cuda.device_count()
     if n_gpus > 1:
-        # creates default process (what's rank, world_size?)
 
         # get one gpu as device
         device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -261,4 +253,5 @@ if __name__ == '__main__':
                 write_checkpoint(model, i_epoch, best=True)
 
     tb_writer.flush()
+    dist.destroy_process_group()
 

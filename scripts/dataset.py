@@ -174,6 +174,7 @@ class TauDataset(Dataset):
         split_index = int(fraction*len(self))
         left.npzs = self.npzs[:split_index]
         right.npzs = self.npzs[split_index:]
+
         return left, right
 
 
